@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using LocalModManager.Abstractions;
 using System.IO;
 using System.Text;
 using BepInEx;
@@ -970,6 +971,7 @@ namespace LocalModManager
             internal int Npc;
             internal bool On;
             internal bool IsPackage;   // master switch for the whole package
+            internal string FeatureId;
             internal int Kind;         // 1 = package header, 2 = unit row
             internal string PkgOf;     // unit row -> owning package ModId
             internal RectTransform RootRt;
@@ -1471,6 +1473,8 @@ namespace LocalModManager
                     if (Time.unscaledTime >= _refreshAt)
                     {
                         _refreshAt = Time.unscaledTime + 1f;
+                        FeaturePluginRegistry.Refresh();
+                        AddMissingFeatureRows();
                         RefreshRows();
                     }
                 }
@@ -1509,7 +1513,7 @@ namespace LocalModManager
                     var row = _rows[i];
                     if (row == null || row.RootRt == null) continue;
                     if (!row.RootRt.gameObject.activeSelf) continue;
-                    float rowH = row.Kind == 1 ? _pkgRowH : _rowHeight;
+                    float rowH = row.Kind == 1 ? _pkgRowH : row.Kind == 4 ? FeatureRowHeight : _rowHeight;
                     float indent = row.Kind == 2 ? 40f : 0f;
                     var rt = row.RootRt;
                     rt.anchorMin = new Vector2(0f, 1f);
@@ -1942,6 +1946,8 @@ namespace LocalModManager
             // ---- rows: stacked vertically from the template row's slot ----
             _rowHeight = rowTemplate.rect.height > 10f ? rowTemplate.rect.height : 60f;
             _nextRowY = rowTemplate.anchoredPosition.y;
+            FeaturePluginRegistry.Refresh();
+            _featureHeaderAdded = false;
 
             var mb = ManagerBehaviour.Instance;
             if (mb == null) Plugin.Logger.LogWarning("[MODPAGE] ManagerBehaviour not up yet");
@@ -1950,7 +1956,7 @@ namespace LocalModManager
             _rowRoots.Clear();
             if (mb != null)
             {
-                foreach (var p in mb.CurrentSnapshot())
+                foreach (var p in ManagerBehaviour.CurrentSnapshot(mb))
                 {
                     if (p == null) continue;
                     AddTitleRow(p.ModId, p.Title, p.RootDir, p.Author, p.Version);
@@ -1964,6 +1970,8 @@ namespace LocalModManager
                     }
                 }
             }
+
+            AddMissingFeatureRows();
 
             // The scrollbar is built LAST on purpose: it must be the topmost child of
             // the page, otherwise the opaque Bg / HeaderBg (both created earlier) draw
@@ -2143,6 +2151,46 @@ namespace LocalModManager
             return label;
         }
 
+        private static bool _featureHeaderAdded;
+        private static float FeatureRowHeight { get { return Mathf.Max(_rowHeight * 1.6f, 96f); } }
+
+        private static void AddMissingFeatureRows()
+        {
+            bool added = false;
+            foreach (var item in FeaturePluginRegistry.Current)
+            {
+                bool exists = false;
+                foreach (var existingRow in _rows) if (existingRow != null && existingRow.Kind == 4 && existingRow.FeatureId == item.Feature.FeatureId) { exists = true; break; }
+                if (exists) continue;
+                if (!_featureHeaderAdded)
+                {
+                    var header = NewRowRoot("FeaturePluginSection", _rowHeight);
+                    MakeLabel(header, "Text", "BepInEx 功能插件", _rowLabelStyle, 24f);
+                    header.GetComponent<UnityEngine.UI.Image>().raycastTarget = false;
+                    _rows.Add(new Row { Kind = 3, RootRt = header });
+                    _featureHeaderAdded = true;
+                }
+                var rt = NewRowRoot("FeaturePluginRow", FeatureRowHeight);
+                string text = FeatureLabel(item.Feature);
+                var label = MakeLabel(rt, "Text", text, _rowLabelStyle, 140f);
+                if (label != null) label.enableWordWrapping = true;
+                var row = new Row { Kind = 4, FeatureId = item.Feature.FeatureId, Label = label, LabelText = text, On = item.Feature.DesiredEnabled, RootRt = rt };
+                AddSwitch(rt, row);
+                added = true;
+            }
+            if (added) Relayout();
+        }
+
+        private static string FeatureLabel(IManagedFeaturePlugin feature)
+        {
+            string description = feature.Description ?? "";
+            string status = feature.StatusMessage ?? "";
+            string detail = status.Length > 0 ? status : description;
+            if (detail.Length > 100) detail = detail.Substring(0, 97) + "...";
+            return (feature.DisplayName ?? feature.FeatureId) + "  v" + (feature.FeatureVersion ?? "?")
+                + "  [" + feature.State + "]\n" + detail;
+        }
+
         private static void AddUnitRow(string modId, string unitId, int npc, string typeName)
         {
             var rowRt = NewRowRoot("ModUnitRow", _rowHeight);
@@ -2237,6 +2285,12 @@ namespace LocalModManager
         {
             try
             {
+                if (row.Kind == 4)
+                {
+                    if (!FeaturePluginRegistry.SetEnabled(row.FeatureId, !row.On))
+                        Plugin.Logger.LogWarning("[FEATURES] no feature accepted request: " + row.FeatureId);
+                    return;
+                }
                 row.On = !row.On;
                 var mb = ManagerBehaviour.Instance;
                 if (mb != null)
@@ -2244,7 +2298,7 @@ namespace LocalModManager
                     if (row.IsPackage)
                     {
                         // master switch: apply to every unit of the package
-                        foreach (var p in mb.CurrentSnapshot())
+                        foreach (var p in ManagerBehaviour.CurrentSnapshot(mb))
                         {
                             if (p == null || p.ModId != row.ModId || p.Units == null) continue;
                             foreach (var un in p.Units)
@@ -2269,7 +2323,7 @@ namespace LocalModManager
         {
             try
             {
-                foreach (var p in mb.CurrentSnapshot())
+                foreach (var p in ManagerBehaviour.CurrentSnapshot(mb))
                 {
                     if (p == null || p.ModId != modId || p.Units == null) continue;
                     foreach (var un in p.Units)
@@ -2296,7 +2350,18 @@ namespace LocalModManager
                 {
                     if (row.Label != null && row.Label.text != row.LabelText)
                         row.Label.text = row.LabelText;
-                    if (mb != null)
+                    if (row.Kind == 4)
+                    {
+                        foreach (var item in FeaturePluginRegistry.Current)
+                        {
+                            if (item.Feature.FeatureId != row.FeatureId) continue;
+                            row.On = item.Feature.DesiredEnabled;
+                            string label = FeatureLabel(item.Feature);
+                            if (row.Label != null && row.Label.text != label) row.Label.text = label;
+                            break;
+                        }
+                    }
+                    else if (mb != null)
                         row.On = row.IsPackage
                             ? PackageAllOn(mb, row.ModId)
                             : mb.EntryEnabled(row.ModId, row.UnitId, row.Npc);
@@ -3957,6 +4022,7 @@ namespace LocalModManager
             Environment.GetEnvironmentVariable("MOD_PAGE_SELFTEST") == "1";
 
         private bool _scanTried;
+        private bool _featureScanTried;
         private float _selfCheckAt = -1f;
         private int _checkRounds;
         private bool _revDone;
@@ -4043,6 +4109,14 @@ namespace LocalModManager
                 if (Input.GetKeyDown(KeyCode.F10)) _show = !_show;
                 if (Input.GetMouseButtonDown(0)) SettingsEntryHook.NoteMouseDown();   // P1 gate source
                 SettingsEntryHook.Maintain();
+                if (!_featureScanTried && Time.time > 5f)
+                {
+                    _featureScanTried = true;
+                    FeaturePluginRegistry.Refresh();
+                    var features = new List<string>();
+                    foreach (var item in FeaturePluginRegistry.Current) features.Add(item.Feature.FeatureId);
+                    Plugin.Logger.LogInfo("[FEATURES] discovered " + features.Count + " managed feature plugin(s): " + string.Join(", ", features));
+                }
                 if (TabDiag.Enabled) TabDiag.Tick();                                  // MOD_TAB_DIAG input probe
 
                 if (!_scanTried && Time.time > 5f)
@@ -4474,10 +4548,11 @@ namespace LocalModManager
         // ---- internal API for the settings-page MOD manager (S2) ----
 
         /// <summary>Throttled package snapshot, shared with the IMGUI window.</summary>
-        internal List<ModPackage> CurrentSnapshot()
+        internal static List<ModPackage> CurrentSnapshot(ManagerBehaviour instance)
         {
-            RefreshSnapshotIfDue();
-            return _snap;
+            if (instance == null) return new List<ModPackage>();
+            instance.RefreshSnapshotIfDue();
+            return instance._snap;
         }
 
         /// <summary>Toggle one registry entry from the settings-page switch rows.</summary>

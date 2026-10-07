@@ -57,3 +57,7 @@
 - 已完成：BepInEx 注入稳定、游戏内 MOD 管理页（原生样式、包/分组两级、滚动修复）、性能无损（p95 偏差 0.00%）、F9 写入四件套实测通过。
 - 进行中：空间传送到达未确认；剧情跳跃未闭环（TryStartQuestProc 返回 False，备选 FlowRuntimeManager.StartInWorld）。
 - 规划：视频替换 AssetOverlay 优先路线、MOD 页自开关 bug 单独立项。
+
+## BepInEx 功能插件接口
+
+`src/bepinex_plugin/abstractions/` 定义与原生 `mod.json` 包相互独立的功能插件控制接口。基础包需将 `LocalModManager.Abstractions.dll` 与 `LocalModManager.dll` 放入 `BepInEx/plugins/`。接口和安装方式见 [BepInEx-Feature-Plugin-API.md](docs/BepInEx-Feature-Plugin-API.md)。Steam 启动仍使用单一 Doorstop/BepInEx 链；此 DLL 不替代或新增注入器。
