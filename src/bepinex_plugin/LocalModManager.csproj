@@ -8,16 +8,15 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <DefaultItemExcludes>$(DefaultItemExcludes);abstractions\**\*.cs</DefaultItemExcludes>
     <!-- P0: no debug metadata, so the assembly carries no build-machine path that
          would make `grep -ri kimi BepInEx\plugins\` match. Flip to `portable` when
          you need line numbers in stack traces during development. -->
     <DebugType>none</DebugType>
   </PropertyGroup>
-
   <PropertyGroup>
     <G Condition="'$(G)' == ''">C:\Program Files (x86)\Steam\steamapps\common\WorldApart</G>
   </PropertyGroup>
-
   <ItemGroup>
     <Reference Include="BepInEx.Core">
       <HintPath>$(G)\BepInEx\core\BepInEx.Core.dll</HintPath>
@@ -118,5 +117,10 @@
       <HintPath>$(G)\BepInEx\interop\CompositePlayer.Runtime.dll</HintPath>
       <Private>false</Private>
     </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="abstractions\LocalModManager.Abstractions.csproj">
+      <Private>true</Private>
+    </ProjectReference>
   </ItemGroup>
 </Project>
