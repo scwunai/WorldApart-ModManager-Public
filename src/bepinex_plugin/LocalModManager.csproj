@@ -1,0 +1,122 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>LocalModManager</AssemblyName>
+    <RootNamespace>LocalModManager</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <!-- P0: no debug metadata, so the assembly carries no build-machine path that
+         would make `grep -ri kimi BepInEx\plugins\` match. Flip to `portable` when
+         you need line numbers in stack traces during development. -->
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <G Condition="'$(G)' == ''">C:\Program Files (x86)\Steam\steamapps\common\WorldApart</G>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx.Core">
+      <HintPath>$(G)\BepInEx\core\BepInEx.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx.Unity.IL2CPP">
+      <HintPath>$(G)\BepInEx\core\BepInEx.Unity.IL2CPP.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx.Unity.Common">
+      <HintPath>$(G)\BepInEx\core\BepInEx.Unity.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2CppInterop.Runtime">
+      <HintPath>$(G)\BepInEx\core\Il2CppInterop.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Game">
+      <HintPath>$(G)\BepInEx\interop\Game.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="A1Framework">
+      <HintPath>$(G)\BepInEx\interop\A1Framework.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(G)\BepInEx\interop\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>$(G)\BepInEx\interop\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(G)\BepInEx\interop\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Luban.Runtime">
+      <HintPath>$(G)\BepInEx\interop\Luban.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(G)\BepInEx\interop\Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Il2Cppmscorlib">
+      <HintPath>$(G)\BepInEx\interop\Il2Cppmscorlib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(G)\BepInEx\core\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(G)\BepInEx\interop\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(G)\BepInEx\interop\Unity.TextMeshPro.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Loxodon.Framework">
+      <HintPath>$(G)\BepInEx\interop\Loxodon.Framework.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(G)\BepInEx\interop\UnityEngine.UIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(G)\BepInEx\interop\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="A1ResourceSystem">
+      <HintPath>$(G)\BepInEx\interop\A1ResourceSystem.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="YooAsset">
+      <HintPath>$(G)\BepInEx\interop\YooAsset.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="A1.UPF.Runtime">
+      <HintPath>$(G)\BepInEx\interop\A1.UPF.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SimpleSave.Runtime">
+      <HintPath>$(G)\BepInEx\interop\SimpleSave.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- v9 P3/P4: FlowRuntimeManager.Scheduler / FindInFlightChangedQuestChains
+         (A1.Flow.Runtime) and VideoResourcePlayer's base class
+         (CompositePlayer.Runtime) need their interop assemblies to compile. -->
+    <Reference Include="A1.Flow.Runtime">
+      <HintPath>$(G)\BepInEx\interop\A1.Flow.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="CompositePlayer.Runtime">
+      <HintPath>$(G)\BepInEx\interop\CompositePlayer.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,17 @@
+# 运行产物与二进制（本仓库只收源码和文档）
+*.dll
+*.exe
+*.obj
+*.zip
+*.log
+bin/
+obj/
+__pycache__/
+venv/
+node_modules/
+
+# tools/ 下是解压好的测试运行环境（BepInEx 本体 + .NET 运行时），整棵目录放行
+!tools/**
+
+# 本目录的整理脚本自身
+_build_repo.py
