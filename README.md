@@ -120,3 +120,13 @@ v13 起，在**游戏目录**新增两个文件即可直接在 Steam 点「开�
 ## BepInEx 功能插件接口
 
 `src/bepinex_plugin/abstractions/` 定义与原生 `mod.json` 包相互独立的功能插件控制接口。管理器只发现实现了 `LocalModManager.Abstractions.IManagedFeaturePlugin` 的插件，不为任意 DLL 推断开关，也不写插件配置。基础包需将 `LocalModManager.dll`、`LocalStoryDebug.dll` 与 `LocalModManager.Abstractions.dll` 一起放入 `BepInEx/plugins/`。接口和安装方式见 [BepInEx-Feature-Plugin-API.md](docs/BepInEx-Feature-Plugin-API.md)。Steam 启动仍使用单一 Doorstop/BepInEx 链；此 DLL 不替代或新增注入器。
+
+## 更新日志
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| v15 | 2026-10-08 | PR #1 兼容性核查七项全过（二进制契约面用 apidump 比对 = IDENTICAL），第三方按契约编译的插件实跑冒烟通过；`docs/BepInEx-Feature-Plugin-API.md` 补 **Versioning policy** 一节；安装脚本加「普通版 / Steam 直启版」**选择菜单**（可选装、可单独卸载）；剧情编辑器 M2 只读查看器交付（剧情脉络 / 人物 / 视频库三视图，只绑 127.0.0.1:8791，全程零写） |
+| v14 | 2026-10-07/08 | `IManagedFeaturePlugin` 契约落地：MOD 管理页新增**与「MOD 管理」平行的「BepInEx 功能插件」标签页**（点击切换，同一套指针门与外观）；`LocalStoryDebug` 实现契约（开关**只控 F9 窗口显隐**，不卸载插件）；`FeaturePluginRegistry` 缓存 chainloader 类型解析（审计 §6.5 性能修复）；`DefaultItemExcludes` 改用 `/`（审计 §6.7）；新增 `.gitattributes` 行尾治理；**契约 DLL 必须与主 DLL 同目录** |
+| v13 | 2026-10-07 | **插件拆分**：`LocalModManager.dll`（MOD 管线 / F10 窗口 / 视频桥接 / 滚动修复 / 真实指针门）+ `LocalStoryDebug.dll`（F9 剧情调试：剧情跳跃 / 玩家参数 / NPC 社交 / 空间传送 / 只读载档 / 存档写入测试）；F9 的三个列表全部改为**下拉菜单**且**全量不截断**（任务 1875 / NPC 1592 / 空间 1881）；新增 **Steam 直接启动 MOD 版**（不改 Steam 启动项、不改游戏既有文件，只新增 `USERENV.dll` + `userenv_orig.dll` 两个文件，删掉即回原版） |
+
+> 部署要点：`BepInEx/plugins/` 下需**同时存在** `LocalModManager.dll`、`LocalModManager.Abstractions.dll`、`LocalStoryDebug.dll`；缺契约 DLL 时「BepInEx 功能插件」标签页会为空，且不会有明显报错。
