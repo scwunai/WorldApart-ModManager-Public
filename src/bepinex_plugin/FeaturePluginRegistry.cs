@@ -13,23 +13,51 @@ namespace LocalModManager
         internal IManagedFeaturePlugin Feature;
     }
 
+    /// <summary>
+    /// Discovers BepInEx plugins that implement <see cref="IManagedFeaturePlugin"/> so the
+    /// MOD page can show them as switchable rows.
+    ///
+    /// v14 (audit 6.5): the IL2CPPChainloader <c>Type</c> is resolved **once** and cached.
+    /// Refresh() runs on the page's 1 Hz throttled branch, and the old code walked
+    /// AppDomain.GetAssemblies() (154 interop assemblies) plus one Assembly.GetType call
+    /// each, every second. Only the plugin *list* is rebuilt now - reflection over the
+    /// (small) plugin table stays, the assembly sweep does not.
+    /// </summary>
     internal static class FeaturePluginRegistry
     {
         private static readonly List<ManagedFeature> Items = new List<ManagedFeature>();
         internal static IReadOnlyList<ManagedFeature> Current { get { return Items; } }
+
+        private static Type _chainloaderType;
+        private static bool _chainloaderSearched;
+
+        /// <summary>Resolve IL2CPPChainloader's Type at most once per process.</summary>
+        private static Type ChainloaderType()
+        {
+            if (_chainloaderSearched) return _chainloaderType;
+            _chainloaderSearched = true;
+            try
+            {
+                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    var t = assembly.GetType("BepInEx.Unity.IL2CPP.IL2CPPChainloader");
+                    if (t != null) { _chainloaderType = t; break; }
+                }
+            }
+            catch (Exception e)
+            {
+                Plugin.Logger.LogWarning("[FEATURES] chainloader type lookup failed: " + e.GetType().Name + ": " + e.Message);
+            }
+            return _chainloaderType;
+        }
 
         internal static void Refresh()
         {
             Items.Clear();
             try
             {
-                Type chainloader = null;
-                foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    chainloader = assembly.GetType("BepInEx.Unity.IL2CPP.IL2CPPChainloader");
-                    if (chainloader != null) break;
-                }
                 object infos = null;
+                var chainloader = ChainloaderType();
                 if (chainloader != null)
                 {
                     object instance = null;

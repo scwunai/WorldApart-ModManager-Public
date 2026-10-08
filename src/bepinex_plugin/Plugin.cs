@@ -33,6 +33,8 @@ namespace LocalModManager
     /// <summary>
     /// Q1: puts a "MOD 管理" entry into the settings page's LEFT TAB COLUMN,
     /// alongside 音量设置 / 显示设置 / 系统设置, directly below 系统设置.
+    /// v14 adds a second, parallel tab "BepInEx 功能插件" directly below it: same
+    /// template geometry, same pointer gate, its own page (see ModPageController).
     ///
     /// v4 injected a row into the SystemPage content area instead; the client
     /// reported that row was not clickable and the shape was wrong. That row is
@@ -42,7 +44,7 @@ namespace LocalModManager
     /// Tab nodes are identified at runtime by their Button.onClick pointing at the
     /// SettingsPanelViewModel; their common parent is the tab column. If that
     /// heuristic finds nothing, the whole panel hierarchy is dumped to
-    /// KIMI\v5_q1_recon.txt (MOD_Q1_RECON=1) so the real structure can be read off
+    /// docs/实施计划与报告/v5_q1_recon.txt (MOD_Q1_RECON=1) so the real structure can be read off
     /// rather than guessed.
     /// </summary>
     [HarmonyPatch(typeof(Game.UI.UPFLogic.Settings.SettingsPanel))]
@@ -54,8 +56,36 @@ namespace LocalModManager
         // Kept so the label and position can be re-asserted: Unity runs its layout
         // pass after we place the node, and the panel's localization may rewrite
         // the text when the page is enabled.
-        private static RectTransform _modTabRect;
-        private static TMPro.TextMeshProUGUI _modTabLabel;
+        //
+        // v14: 两个标签（MOD 管理 / BepInEx 功能插件）共用同一套创建、保活、定位与
+        // 点击门代码。手抄第二份创建代码迟早会让两边的几何或门禁走样，所以抽成一个
+        // Tab 描述；MOD 标签的节点名、日志前缀与文案全部保持原样，基线输出逐字不变。
+        private sealed class Tab
+        {
+            internal string NodeName;   // 节点名，"已存在则复用"靠它查找
+            internal string Text;       // 每帧保活的文案
+            internal string Tag;        // 点击日志前缀；MOD 标签必须是 "MOD"
+            internal bool Diag;         // 只有 MOD 标签接入 TabDiag，避免抢它的 _btnId 绑定
+            internal ModPageController.PageMode Mode;
+            internal UnityEngine.Events.UnityAction OnClick;
+            internal RectTransform Rt;
+            internal TMPro.TextMeshProUGUI Label;
+        }
+
+        private static readonly Tab ModTab = new Tab
+        {
+            NodeName = "MODTab", Text = "MOD 管理", Tag = "MOD", Diag = true,
+            Mode = ModPageController.PageMode.Packages
+        };
+
+        private static readonly Tab FeatureTab = new Tab
+        {
+            NodeName = "FeatureTab", Text = "BepInEx 功能插件", Tag = "FEATURES", Diag = false,
+            Mode = ModPageController.PageMode.Features
+        };
+
+        private static readonly Tab[] _tabs = { ModTab, FeatureTab };
+
         private static RectTransform _navSystemRect;
         private static float _maintainAt;
         private static float _injectAt = -1f;
@@ -73,19 +103,23 @@ namespace LocalModManager
         }
 
         /// <summary>Diagnostic accessor for the MOD_TAB_DIAG logging / gate self test.</summary>
-        internal static RectTransform ModTabRect { get { return _modTabRect; } }
+        internal static RectTransform ModTabRect { get { return ModTab.Rt; } }
+
+        /// <summary>Accessor for the v14 P6 self test of the second tab (BepInEx 功能插件).</summary>
+        internal static RectTransform FeatureTabRect { get { return FeatureTab.Rt; } }
 
         /// <summary>Called from ManagerBehaviour.Update; cheap and fully guarded.</summary>
         internal static void Maintain()
         {
             try
             {
-                if (_modTabRect == null) return;
+                if (ModTab.Rt == null) return;
                 if (Time.unscaledTime < _maintainAt) return;
                 _maintainAt = Time.unscaledTime + 0.25f;
 
-                if (_modTabLabel != null && _modTabLabel.text != "MOD 管理")
-                    _modTabLabel.text = "MOD 管理";
+                for (int i = 0; i < _tabs.Length; i++)
+                    if (_tabs[i].Label != null && _tabs[i].Label.text != _tabs[i].Text)
+                        _tabs[i].Label.text = _tabs[i].Text;
 
                 PlaceBelowNav();
 
@@ -102,12 +136,14 @@ namespace LocalModManager
 
                 ModPageController.Tick();
                 if (TabDiag.GateTest) TabDiag.GateTick();
+                if (TabDiag.FeatureTabTest) TabDiag.FeatureTabTick();   // v14 P6: 第二标签页自测
             }
             catch { }
         }
 
         private static int _chainDumps;
         private static bool _rectLogged;
+        private static bool _featRectLogged;   // v14: 功能插件标签的位置诊断只打一次
         private static float _lastPointerDownAt = -1e6f;
 
         /// <summary>
@@ -180,33 +216,51 @@ namespace LocalModManager
         /// stays hidden; afterwards it copies navSystem's anchors/pivot/size and
         /// sits exactly one row below it. Re-asserted every 0.25 s, which also
         /// follows any UPF re-layout.
+        ///
+        /// v14: 逐个标签往下排——第一个（MOD 管理）落在 navSystem 正下方的基线位置，
+        /// 第二个（BepInEx 功能插件）再往下同样一行，几何全部复制自 navSystem，
+        /// 所以两个标签大小、锚点、视觉来源完全一致。
         /// </summary>
         private static void PlaceBelowNav()
         {
-            if (_modTabRect == null || _navSystemRect == null) return;
+            if (ModTab.Rt == null || _navSystemRect == null) return;
             try
             {
                 var navRt = _navSystemRect;
                 bool baked = navRt.rect.width > 50f && navRt.anchoredPosition.sqrMagnitude > 0.5f;
-                if (!baked)
+                float y = navRt.anchoredPosition.y;
+                for (int i = 0; i < _tabs.Length; i++)
                 {
-                    if (_modTabRect.gameObject.activeSelf) _modTabRect.gameObject.SetActive(false);
-                    return;
-                }
-                if (!_modTabRect.gameObject.activeSelf) _modTabRect.gameObject.SetActive(true);
+                    var tab = _tabs[i];
+                    if (tab.Rt == null) continue;
+                    if (!baked)
+                    {
+                        if (tab.Rt.gameObject.activeSelf) tab.Rt.gameObject.SetActive(false);
+                        continue;
+                    }
+                    if (!tab.Rt.gameObject.activeSelf) tab.Rt.gameObject.SetActive(true);
 
-                int wantIndex = navRt.GetSiblingIndex() + 1;
-                if (_modTabRect.GetSiblingIndex() != wantIndex)
-                    _modTabRect.SetSiblingIndex(wantIndex);
+                    int wantIndex = navRt.GetSiblingIndex() + 1 + i;
+                    if (tab.Rt.GetSiblingIndex() != wantIndex)
+                        tab.Rt.SetSiblingIndex(wantIndex);
 
-                ModPageController.CopyRect(navRt, _modTabRect);
-                var ap = navRt.anchoredPosition;
-                _modTabRect.anchoredPosition = new Vector2(ap.x, ap.y - (navRt.rect.height + 4f));
-                if (TabDiag.Enabled && !_rectLogged)
-                {
-                    _rectLogged = true;
-                    TabDiag.LogRect("TABRECT", _modTabRect);
-                    TabDiag.LogRect("NAVRECT", _navSystemRect);
+                    ModPageController.CopyRect(navRt, tab.Rt);
+                    var ap = navRt.anchoredPosition;
+                    y -= navRt.rect.height + 4f;      // 逐行下移，沿用基线的一行间距
+                    tab.Rt.anchoredPosition = new Vector2(ap.x, y);
+                    if (i == 0 && TabDiag.Enabled && !_rectLogged)
+                    {
+                        _rectLogged = true;
+                        TabDiag.LogRect("TABRECT", tab.Rt);
+                        TabDiag.LogRect("NAVRECT", _navSystemRect);
+                    }
+                    if (i == 1 && TabDiag.Enabled && !_featRectLogged)
+                    {
+                        _featRectLogged = true;
+                        // 名字刻意不含 "TABRECT"：v9 的验收脚本按 'TABRECT unity=' 取坐标，
+                        // 多一条同前缀的行会让它瞄到错误的标签。
+                        TabDiag.LogRect("FEATRECT", tab.Rt);
+                    }
                 }
             }
             catch { }
@@ -256,101 +310,136 @@ namespace LocalModManager
                     Note(source + ": tab column not found (run with MOD_Q1_RECON=1 for a hierarchy dump)");
                     return;
                 }
-                var existing = FindChild(container, "MODTab");
-                if (existing != null)
-                {
-                    // Injection is per panel instance: the settings panel is
-                    // recreated on every open, so a previous instance's MODTab is
-                    // long gone. If this instance already has one, adopt it and
-                    // leave; geometry is re-asserted by PlaceBelowNav().
-                    int oldId = TabDiag.Id(_modTabRect);
-                    _modTabRect = existing.GetComponent<RectTransform>();
-                    _modTabLabel = existing.GetComponentInChildren<TMPro.TextMeshProUGUI>(true);
-                    _navSystemRect = template.GetComponent<RectTransform>();
-                    _panel = panel;
-                    if (TabDiag.Enabled)
-                    {
-                        TabDiag.Bind(existing.GetComponent<UnityEngine.UI.Button>());
-                        TabDiag.LogReinject(source + ":adopt-existing", oldId, TabDiag.Id(existing));
-                    }
-                    return;
-                }
-
-                // S2 fix: do NOT clone navSystem. A clone carries its UPF element
-                // identity (A1ElementIdentity / style drivers), and the UPF layout
-                // engine then treats the clone as another instance of the same tab
-                // and repositions/restyles it every frame - the v7 build ended up
-                // parked at the column's raw anchor point, invisible. Build a plain
-                // uGUI node instead, copying only visuals (bg sprite, canvas alpha,
-                // label font/size/color); PlaceBelowNav() asserts geometry once the
-                // column has a baked rect.
-                var navImg = template.GetComponent<UnityEngine.UI.Image>();
-                var navBgT = FindChild(template, "__BackgroundImage");
-                var navBg = navBgT != null ? navBgT.GetComponent<UnityEngine.UI.Image>() : null;
-                var navLabel = template.GetComponentInChildren<TMPro.TextMeshProUGUI>(true);
-
-                var go = new GameObject("MODTab");
-                go.AddComponent<RectTransform>();
-                go.AddComponent<UnityEngine.UI.Image>();
-                go.AddComponent<UnityEngine.UI.Button>();
-                go.AddComponent<CanvasGroup>();
-                go.transform.SetParent(container, false);
-                ModPageController.CopyRect(template.GetComponent<RectTransform>(),
-                                           (RectTransform)go.transform);
-
-                var own = go.GetComponent<UnityEngine.UI.Image>();
-                own.raycastTarget = true;
-                if (navBg != null) { own.sprite = navBg.sprite; own.color = navBg.color; own.type = navBg.type; }
-                else if (navImg != null) own.color = navImg.color;
-                var cg = go.GetComponent<CanvasGroup>();
-                cg.alpha = 0.82f;   // matches the native tabs' CanvasGroup(a=0.82)
-
-                var label = ModPageController.MakeLabel(go.transform, "Text", "MOD 管理", navLabel);
-                int images = 2;
-
-                _modTabRect = (RectTransform)go.transform;
-                _modTabLabel = label;
                 _navSystemRect = template.GetComponent<RectTransform>();
+                _panel = panel;
 
-                // Own uGUI Button over the copied raycast Image.
-                var btn = go.GetComponent<UnityEngine.UI.Button>();
-                bool addedBtn = true;
-                btn.targetGraphic = own;
-                int had = 0;
-                btn.onClick.RemoveAllListeners();
-                btn.onClick.AddListener((UnityEngine.Events.UnityAction)OnModTabClicked);
-                if (TabDiag.Enabled)
+                // v14: 两个标签走同一条注入路径——已存在就复用，缺失就按同一个模板建。
+                UnityEngine.UI.Image navImg = null, navBg = null;
+                TMPro.TextMeshProUGUI navLabel = null;
+                var created = new List<Tab>();
+                for (int i = 0; i < _tabs.Length; i++)
                 {
-                    TabDiag.Bind(btn);
-                    TabDiag.LogReinject(source + ":create", TabDiag.Id(_modTabRect), TabDiag.Id(go));
+                    var tab = _tabs[i];
+                    var existing = FindChild(container, tab.NodeName);
+                    if (existing != null)
+                    {
+                        // Injection is per panel instance: the settings panel is
+                        // recreated on every open, so a previous instance's MODTab is
+                        // long gone. If this instance already has one, adopt it and
+                        // leave; geometry is re-asserted by PlaceBelowNav().
+                        int oldId = TabDiag.Id(tab.Rt);
+                        tab.Rt = existing.GetComponent<RectTransform>();
+                        tab.Label = existing.GetComponentInChildren<TMPro.TextMeshProUGUI>(true);
+                        if (tab.Diag && TabDiag.Enabled)
+                        {
+                            TabDiag.Bind(existing.GetComponent<UnityEngine.UI.Button>());
+                            TabDiag.LogReinject(source + ":adopt-existing", oldId, TabDiag.Id(existing));
+                        }
+                        continue;
+                    }
+
+                    // 视觉模板只在真要建节点时读，复用路径与基线一样不碰模板（读坏了
+                    // 也只是少两个标签的贴图，不该让整次注入抛出去）。
+                    if (navLabel == null)
+                    {
+                        navImg = template.GetComponent<UnityEngine.UI.Image>();
+                        var navBgT = FindChild(template, "__BackgroundImage");
+                        navBg = navBgT != null ? navBgT.GetComponent<UnityEngine.UI.Image>() : null;
+                        navLabel = template.GetComponentInChildren<TMPro.TextMeshProUGUI>(true);
+                    }
+
+                    created.Add(tab);
+                    var go = CreateTabNode(container, template, navImg, navBg, navLabel, tab);
+                    if (tab.Diag && TabDiag.Enabled)
+                        TabDiag.LogReinject(source + ":create", TabDiag.Id(tab.Rt), TabDiag.Id(go));
                 }
-                // Without this the EventSystem can reach the new Button through
-                // keyboard/gamepad navigation and fire onClick on Submit, which
-                // showed up as spurious "MOD tab clicked" lines with no mouse input.
-                try
-                {
-                    btn.transition = UnityEngine.UI.Selectable.Transition.None;
-                    var nav = btn.navigation;
-                    nav.mode = UnityEngine.UI.Navigation.Mode.None;
-                    btn.navigation = nav;
-                }
-                catch (Exception e) { Plugin.Logger.LogWarning("[SETTINGS] navigation reset: " + e.Message); }
+
+                // Both tabs already on this panel instance: nothing to add, and the
+                // baseline adopt path returned here without re-logging the injection.
+                if (created.Count == 0) return;
+
                 _injectAt = Time.unscaledTime;
                 _chainDumps = 0;
                 _rectLogged = false;
+                _featRectLogged = false;
                 Maintain();
                 _maintainAt = 0f;
                 Maintain();
                 Plugin.Logger.LogInfo("[SETTINGS] tab column after insert: " + ChildGeometry(container));
-                Plugin.Logger.LogInfo("[SETTINGS] MOD tab added via " + source
-                                      + " (container='" + container.name + "', childCount=" + count
-                                      + ", template='" + template.name + "', templateListeners=" + had
-                                      + ", addedButton=" + addedBtn + ", raycastImages=" + images + ")");
+                for (int i = 0; i < created.Count; i++)
+                {
+                    var tab = created[i];
+                    int images = 2;
+                    bool addedBtn = true;
+                    int had = 0;
+                    Plugin.Logger.LogInfo("[SETTINGS] " + tab.Tag + " tab added via " + source
+                                          + " (container='" + container.name + "', childCount=" + count
+                                          + ", template='" + template.name + "', templateListeners=" + had
+                                          + ", addedButton=" + addedBtn + ", raycastImages=" + images + ")");
+                }
             }
             catch (Exception e)
             {
                 Plugin.Logger.LogWarning("[SETTINGS] tab injection failed at " + source + ": " + e);
             }
+        }
+
+        /// <summary>
+        /// S2 fix: do NOT clone navSystem. A clone carries its UPF element
+        /// identity (A1ElementIdentity / style drivers), and the UPF layout
+        /// engine then treats the clone as another instance of the same tab
+        /// and repositions/restyles it every frame - the v7 build ended up
+        /// parked at the column's raw anchor point, invisible. Build a plain
+        /// uGUI node instead, copying only visuals (bg sprite, canvas alpha,
+        /// label font/size/color); PlaceBelowNav() asserts geometry once the
+        /// column has a baked rect. Two tabs call this with the same template,
+        /// so 两个标签的外观来自同一份来源。
+        /// </summary>
+        private static GameObject CreateTabNode(Transform container, Transform template,
+            UnityEngine.UI.Image navImg, UnityEngine.UI.Image navBg,
+            TMPro.TextMeshProUGUI navLabel, Tab tab)
+        {
+            var go = new GameObject(tab.NodeName);
+            go.AddComponent<RectTransform>();
+            go.AddComponent<UnityEngine.UI.Image>();
+            go.AddComponent<UnityEngine.UI.Button>();
+            go.AddComponent<CanvasGroup>();
+            go.transform.SetParent(container, false);
+            ModPageController.CopyRect(template.GetComponent<RectTransform>(),
+                                       (RectTransform)go.transform);
+
+            var own = go.GetComponent<UnityEngine.UI.Image>();
+            own.raycastTarget = true;
+            if (navBg != null) { own.sprite = navBg.sprite; own.color = navBg.color; own.type = navBg.type; }
+            else if (navImg != null) own.color = navImg.color;
+            var cg = go.GetComponent<CanvasGroup>();
+            cg.alpha = 0.82f;   // matches the native tabs' CanvasGroup(a=0.82)
+
+            var label = ModPageController.MakeLabel(go.transform, "Text", tab.Text, navLabel);
+
+            tab.Rt = (RectTransform)go.transform;
+            tab.Label = label;
+
+            // Own uGUI Button over the copied raycast Image.
+            var btn = go.GetComponent<UnityEngine.UI.Button>();
+            btn.targetGraphic = own;
+            btn.onClick.RemoveAllListeners();
+            // 委托在注入时才建（此刻 IL2CPP 一定已就绪），不在静态初始化里建。
+            if (tab.OnClick == null)
+                tab.OnClick = (UnityEngine.Events.UnityAction)(() => OnTabClicked(tab));
+            btn.onClick.AddListener(tab.OnClick);
+            // Without this the EventSystem can reach the new Button through
+            // keyboard/gamepad navigation and fire onClick on Submit, which
+            // showed up as spurious "MOD tab clicked" lines with no mouse input.
+            try
+            {
+                btn.transition = UnityEngine.UI.Selectable.Transition.None;
+                var nav = btn.navigation;
+                nav.mode = UnityEngine.UI.Navigation.Mode.None;
+                btn.navigation = nav;
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning("[SETTINGS] navigation reset: " + e.Message); }
+            return go;
         }
 
         /// <summary>Direct-child lookup by name; Transform.Find proved unreliable here.</summary>
@@ -496,14 +585,18 @@ namespace LocalModManager
             Plugin.Logger.LogInfo("[SETTINGS] " + reason);
         }
 
-        private static void OnModTabClicked()
+        /// <summary>
+        /// 两个标签共用的点击入口：日志前缀由 tab.Tag 决定（MOD 标签输出与基线逐字一致），
+        /// 指针门对两个标签一视同仁——没有真实按下的 onClick.Invoke() 不许切页。
+        /// </summary>
+        private static void OnTabClicked(Tab tab)
         {
             try
             {
-                if (TabDiag.Enabled)
-                    TabDiag.LogClick(_modTabRect != null ? _modTabRect.GetComponent<UnityEngine.UI.Button>() : null,
-                                     _modTabRect != null ? _modTabRect.gameObject : null);
-                Plugin.Logger.LogInfo("[SETTINGS] MOD tab clicked t="
+                if (TabDiag.Enabled && tab.Diag)
+                    TabDiag.LogClick(tab.Rt != null ? tab.Rt.GetComponent<UnityEngine.UI.Button>() : null,
+                                     tab.Rt != null ? tab.Rt.gameObject : null);
+                Plugin.Logger.LogInfo("[SETTINGS] " + tab.Tag + " tab clicked t="
                                       + Time.unscaledTime.ToString("F2")
                                       + " mouseDown=" + Input.GetMouseButton(0));
 
@@ -517,20 +610,20 @@ namespace LocalModManager
                 bool pressedRecently = since >= 0f && since <= 0.3f;
                 if (!pressedRecently && !Input.GetMouseButtonUp(0))
                 {
-                    Plugin.Logger.LogInfo("[SETTINGS] MOD tab click ignored (no real pointer) t="
+                    Plugin.Logger.LogInfo("[SETTINGS] " + tab.Tag + " tab click ignored (no real pointer) t="
                                           + Time.unscaledTime.ToString("F2")
                                           + " sinceMouseDown=" + (since > 1e5f ? "never" : since.ToString("F3"))
                                           + " mouseUp0=" + Input.GetMouseButtonUp(0));
                     return;
                 }
 
-                ModPageController.Toggle(_panel);
+                ModPageController.Toggle(_panel, tab.Mode);
             }
-            catch (Exception e) { Plugin.Logger.LogWarning("[SETTINGS] MOD tab click handler failed: " + e); }
+            catch (Exception e) { Plugin.Logger.LogWarning("[SETTINGS] " + tab.Tag + " tab click handler failed: " + e); }
         }
 
         /// <summary>Records the last physical left-button press seen this frame; the
-        /// P1 gate in OnModTabClicked requires one within 0.3 s of the click.</summary>
+        /// P1 gate in OnTabClicked requires one within 0.3 s of the click.</summary>
         internal static void NoteMouseDown()
         {
             try { _lastPointerDownAt = Time.unscaledTime; } catch { }
@@ -762,6 +855,50 @@ namespace LocalModManager
             catch (Exception e) { Plugin.Logger.LogWarning("[DBG] GATETEST failed: " + e.Message); _gateStep = 5; }
         }
 
+        /// <summary>MOD_FEATURE_TAB_SELFTEST=1 (v14 P6): drives the second tab
+        /// （「BepInEx 功能插件」）through the very same v9 pointer gate as GATETEST, so the
+        /// new tab is verifiable without OS input: B1 must switch to the feature page
+        /// （期望 [FEATURES] page built + [MODPAGE] shown … page=features），B2 must hide it
+        /// （期望 [MODPAGE] hidden）。</summary>
+        internal static readonly bool FeatureTabTest =
+            Environment.GetEnvironmentVariable("MOD_FEATURE_TAB_SELFTEST") == "1";
+
+        private static int _ftStep;
+        private static float _ftAt;
+
+        internal static void FeatureTabTick()
+        {
+            if (!FeatureTabTest) return;
+            try
+            {
+                var rt = SettingsEntryHook.FeatureTabRect;
+                var btn = rt == null ? null : rt.GetComponent<UnityEngine.UI.Button>();
+                if (btn == null) return;
+                if (_ftAt == 0f) { _ftAt = Time.unscaledTime + 8f; return; }
+                if (Time.unscaledTime < _ftAt) return;
+                switch (_ftStep)
+                {
+                    case 0:
+                        _ftStep = 1; _ftAt = Time.unscaledTime + 3f;
+                        Plugin.Logger.LogInfo("[DBG] FEATTAB B1: NoteMouseDown() then onClick.Invoke() (expect feature page shown)");
+                        SettingsEntryHook.NoteMouseDown();
+                        btn.onClick.Invoke();
+                        break;
+                    case 1:
+                        _ftStep = 2; _ftAt = Time.unscaledTime + 3f;
+                        Plugin.Logger.LogInfo("[DBG] FEATTAB B2: NoteMouseDown() then onClick.Invoke() (expect feature page hidden)");
+                        SettingsEntryHook.NoteMouseDown();
+                        btn.onClick.Invoke();
+                        break;
+                    case 2:
+                        _ftStep = 3;
+                        Plugin.Logger.LogInfo("[DBG] FEATTAB done");
+                        break;
+                }
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning("[DBG] FEATTAB failed: " + e.Message); _ftStep = 3; }
+        }
+
         /// <summary>MOD_TAB_DIAG input probe. Logs mouse presence and position every
         /// 5 s, plus every left-button down/up, so a synthetic-input acceptance run
         /// can prove whether the game sees legacy Input events at all.</summary>
@@ -962,6 +1099,10 @@ namespace LocalModManager
     /// Page switching: showing the MOD page sets the four native pages inactive;
     /// clicking any native tab makes the VM change ActivePage, which Tick()
     /// detects and hides the MOD page (anti cross-talk).
+    ///
+    /// v14: 这一页现在按 PageMode 画两种内容——Packages（包/单元行，即 MOD 管理页）
+    /// 与 Features（BepInEx 功能插件页）。左栏两个标签各点各的模式，行在切页时重建，
+    /// 模板几何、滚动条、开关绘制与 1 Hz 刷新全部共用，所以两页外观与行为一致。
     /// </summary>
     static class ModPageController
     {
@@ -971,8 +1112,8 @@ namespace LocalModManager
             internal int Npc;
             internal bool On;
             internal bool IsPackage;   // master switch for the whole package
-            internal string FeatureId;
-            internal int Kind;         // 1 = package header, 2 = unit row
+            internal string FeatureId;  // kind 4: which managed feature this row toggles
+            internal int Kind;         // 1 = package header, 2 = unit row, 3 = section title, 4 = feature row
             internal string PkgOf;     // unit row -> owning package ModId
             internal RectTransform RootRt;
             internal TMPro.TextMeshProUGUI Arrow;   // package header expand arrow
@@ -983,8 +1124,18 @@ namespace LocalModManager
             internal Color KnobOnColor;
         }
 
+        /// <summary>
+        /// v14: 同一套构建/布局/滚动/开关代码画两种页。Packages = 原有的 MOD 管理页
+        /// （包/单元行，不再含功能插件分区），Features = BepInEx 功能插件页（Kind 4 行）。
+        /// 左栏两个标签各自指定模式，切页只是换一批行。
+        /// </summary>
+        internal enum PageMode { Packages, Features }
+
         private const string PageName = "MODPage";
         private const string HeaderText = "MOD 管理";
+        private const string FeatureHeaderText = "BepInEx 功能插件";
+        private static PageMode _mode = PageMode.Packages;
+        private static bool _featurePageBuiltLogged;
 
         private static GameObject _page;
         private static RectTransform _pageRt;
@@ -1015,7 +1166,7 @@ namespace LocalModManager
         private static RectTransform _viewportRt;      // scroll viewport (visible window)
         private static RectTransform _headerRt;        // our header row root
         private static readonly List<RectTransform> _rowRoots = new List<RectTransform>();
-        // Scroll support (see KIMI\MOD页滚动修复_实施报告.md). Content is the rows'
+        // Scroll support (see docs/实施计划与报告/MOD页滚动修复_实施报告.md). Content is the rows'
         // parent and the only node that moves; its top edge is the page's top edge,
         // so Relayout's row maths (y measured from the container's top edge) stays
         // exactly as it was.
@@ -1042,13 +1193,20 @@ namespace LocalModManager
         private const float DeltaPerWheelDetent = 360f;
         private const float RowStepPerDetent = 0.5f;
 
-        internal static void Toggle(Game.UI.UPFLogic.Settings.SettingsPanel panel)
+        /// <summary>点标签：同页再点=收起（基线行为）；从另一页点过来=切页。</summary>
+        internal static void Toggle(Game.UI.UPFLogic.Settings.SettingsPanel panel, PageMode mode)
         {
-            if (_visible) { Hide(); return; }
-            Show(panel);
+            if (_visible && _mode == mode) { Hide(); return; }
+            Show(panel, mode);
         }
 
+        /// <summary>MOD_PAGE_SELFTEST 的入口，与基线一样打开包管理页。</summary>
         internal static void Show(Game.UI.UPFLogic.Settings.SettingsPanel panel)
+        {
+            Show(panel, PageMode.Packages);
+        }
+
+        internal static void Show(Game.UI.UPFLogic.Settings.SettingsPanel panel, PageMode mode)
         {
             try
             {
@@ -1062,6 +1220,7 @@ namespace LocalModManager
                 // content. The page's opaque Bg image covers them instead.
 
                 _page.SetActive(true);
+                SetMode(mode);     // 换一批行：切页时另一页的行在这里被清掉
                 if (_scrollRect != null)   // F3: a freshly opened page starts at the top
                 {
                     try { _scrollRect.StopMovement(); } catch { }
@@ -1071,7 +1230,8 @@ namespace LocalModManager
                 _visible = true;
                 SyncGameScrollbar(); // put the native pages' scrollbar away
                 _refreshAt = 0f;   // force an immediate row refresh
-                Plugin.Logger.LogInfo("[MODPAGE] shown (native pages hidden, rows=" + _rows.Count
+                Plugin.Logger.LogInfo("[MODPAGE] shown (native pages hidden, page=" + ModeName(mode)
+                                      + ", rows=" + _rows.Count
                                       + ", openOnActivePage='" + _openOnActivePage + "', contentH="
                                       + _contentHeight.ToString("F0") + ")");
             }
@@ -1468,13 +1628,15 @@ namespace LocalModManager
                     if (!_page.activeSelf) _page.SetActive(true);   // UPF binding re-assert
                     Relayout();   // template rects may have baked after Build
                     Diag();       // 1 Hz render-state dump while visible
-                    if (_headerLabel != null && _headerLabel.text != HeaderText)
-                        _headerLabel.text = HeaderText;
+                    string title = ModeTitle(_mode);
+                    if (_headerLabel != null && _headerLabel.text != title)
+                        _headerLabel.text = title;
                     if (Time.unscaledTime >= _refreshAt)
                     {
                         _refreshAt = Time.unscaledTime + 1f;
-                        FeaturePluginRegistry.Refresh();
-                        AddMissingFeatureRows();
+                        FeaturePluginRegistry.Refresh();   // 1 Hz: cheap now (type cached, see registry)
+                        // 只有功能页才补行：包管理页里不该出现功能插件行（v14）。
+                        if (_mode == PageMode.Features) AddMissingFeatureRows();
                         RefreshRows();
                     }
                 }
@@ -1513,7 +1675,10 @@ namespace LocalModManager
                     var row = _rows[i];
                     if (row == null || row.RootRt == null) continue;
                     if (!row.RootRt.gameObject.activeSelf) continue;
-                    float rowH = row.Kind == 1 ? _pkgRowH : row.Kind == 4 ? FeatureRowHeight : _rowHeight;
+                    float rowH = row.Kind == 1 ? _pkgRowH
+                               : row.Kind == 3 ? _rowHeight
+                               : row.Kind == 4 ? FeatureRowHeight
+                               : _rowHeight;
                     float indent = row.Kind == 2 ? 40f : 0f;
                     var rt = row.RootRt;
                     rt.anchorMin = new Vector2(0f, 1f);
@@ -1947,31 +2112,13 @@ namespace LocalModManager
             _rowHeight = rowTemplate.rect.height > 10f ? rowTemplate.rect.height : 60f;
             _nextRowY = rowTemplate.anchoredPosition.y;
             FeaturePluginRegistry.Refresh();
-            _featureHeaderAdded = false;
 
-            var mb = ManagerBehaviour.Instance;
-            if (mb == null) Plugin.Logger.LogWarning("[MODPAGE] ManagerBehaviour not up yet");
+            if (ManagerBehaviour.Instance == null)
+                Plugin.Logger.LogWarning("[MODPAGE] ManagerBehaviour not up yet");
 
-            _rows.Clear();
-            _rowRoots.Clear();
-            if (mb != null)
-            {
-                foreach (var p in ManagerBehaviour.CurrentSnapshot(mb))
-                {
-                    if (p == null) continue;
-                    AddTitleRow(p.ModId, p.Title, p.RootDir, p.Author, p.Version);
-                    int n = p.Units == null ? 0 : p.Units.Count;
-                    for (int u = 0; u < n; u++)
-                    {
-                        var un = p.Units[u];
-                        if (un == null) continue;
-                        int npc = ModRegistry.UnitEntryNpcId(un);
-                        AddUnitRow(p.ModId, un.UnitId, npc, un.Type.ToString());
-                    }
-                }
-            }
-
-            AddMissingFeatureRows();
+            // v14: 行不再一次建死。SetMode 按页模式重建（包/单元 vs 功能插件），
+            // 两页共用下面的模板几何、滚动条与行样式。
+            SetMode(PageMode.Packages);
 
             // The scrollbar is built LAST on purpose: it must be the topmost child of
             // the page, otherwise the opaque Bg / HeaderBg (both created earlier) draw
@@ -1984,6 +2131,88 @@ namespace LocalModManager
                                   + "' (rows=" + _rows.Count + ", headerLabel=" + (_headerLabel != null)
                                   + ", rowHeight=" + _rowHeight.ToString("F0") + ")");
             return true;
+        }
+
+        /// <summary>
+        /// 按页模式重建行：清掉上一页的行，再按 mode 造一批。两页共用同一套模板几何
+        /// （_rowTemplateRt / _swTemplateRt / …）、同一个滚动条与同样的开关绘制，所以
+        /// 两个标签页的外观与行为一致；切页只是换一批行。
+        /// </summary>
+        private static void SetMode(PageMode mode)
+        {
+            try
+            {
+                if (_contentRt == null) return;
+                _mode = mode;
+                FeaturePluginRegistry.Refresh();
+                ClearRows();
+                if (_rowTemplateRt != null) _nextRowY = _rowTemplateRt.anchoredPosition.y;
+                if (mode == PageMode.Features)
+                {
+                    AddMissingFeatureRows();
+                    if (!_featurePageBuiltLogged)
+                    {
+                        _featurePageBuiltLogged = true;
+                        Plugin.Logger.LogInfo("[FEATURES] page built (rows=" + _rows.Count + ", page=features)");
+                    }
+                }
+                else BuildPackageRows();
+                if (_headerLabel != null) _headerLabel.text = ModeTitle(mode);
+                SyncExpand();
+                Relayout();
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning("[MODPAGE] set mode failed: " + e.Message); }
+        }
+
+        /// <summary>清空当前页的行节点。先 SetActive(false) 再 Destroy：Destroy 到帧末
+        /// 才生效，不隐藏的话旧行会在这一帧和新行叠在一起闪一下。</summary>
+        private static void ClearRows()
+        {
+            for (int i = 0; i < _rowRoots.Count; i++)
+            {
+                try
+                {
+                    var rt = _rowRoots[i];
+                    if (rt == null) continue;
+                    rt.gameObject.SetActive(false);
+                    UnityEngine.Object.Destroy(rt.gameObject);
+                }
+                catch { }
+            }
+            _rowRoots.Clear();
+            _rows.Clear();
+        }
+
+        /// <summary>包/单元行（Kind 1/2）：MOD 管理页的内容，v14 起不再含功能插件分区。</summary>
+        private static void BuildPackageRows()
+        {
+            var mb = ManagerBehaviour.Instance;
+            if (mb == null) return;   // "ManagerBehaviour not up yet" 已在 Build 里报过
+            foreach (var p in mb.CurrentSnapshot())
+            {
+                if (p == null) continue;
+                AddTitleRow(p.ModId, p.Title, p.RootDir, p.Author, p.Version);
+                int n = p.Units == null ? 0 : p.Units.Count;
+                for (int u = 0; u < n; u++)
+                {
+                    var un = p.Units[u];
+                    if (un == null) continue;
+                    int npc = ModRegistry.UnitEntryNpcId(un);
+                    AddUnitRow(p.ModId, un.UnitId, npc, un.Type.ToString());
+                }
+            }
+        }
+
+        /// <summary>切页日志用的页名（[MODPAGE] 前缀不变，只多一个 page= 字段）。</summary>
+        private static string ModeName(PageMode mode)
+        {
+            return mode == PageMode.Features ? "features" : "packages";
+        }
+
+        /// <summary>页面标题：两个标签页各用各的（沿用原生 header 机制）。</summary>
+        private static string ModeTitle(PageMode mode)
+        {
+            return mode == PageMode.Features ? FeatureHeaderText : HeaderText;
         }
 
         /// <summary>Fresh uGUI row root (bg sprite copied), stacked below the previous row.</summary>
@@ -2151,25 +2380,27 @@ namespace LocalModManager
             return label;
         }
 
-        private static bool _featureHeaderAdded;
+        // ---- v14: BepInEx 功能插件页（契约见 abstractions/IManagedFeaturePlugin.cs）----
+        // 这些行自成一个标签页（PageMode.Features），MOD 管理页里不再出现。
+
+        /// <summary>Feature rows carry two lines of text (name+state / detail), so they
+        /// need more height than a unit row. Mirrors the template-derived _rowHeight.</summary>
         private static float FeatureRowHeight { get { return Mathf.Max(_rowHeight * 1.6f, 96f); } }
 
+        /// <summary>Appends a row for every discovered managed feature that has no row
+        /// yet. Only adds: 功能页重建后、或页面显示期间新加载的插件都能补齐，
+        /// 已有行的状态由 1 Hz 的 RefreshRows 同步。</summary>
         private static void AddMissingFeatureRows()
         {
             bool added = false;
             foreach (var item in FeaturePluginRegistry.Current)
             {
+                if (item == null || item.Feature == null) continue;
                 bool exists = false;
-                foreach (var existingRow in _rows) if (existingRow != null && existingRow.Kind == 4 && existingRow.FeatureId == item.Feature.FeatureId) { exists = true; break; }
+                foreach (var existingRow in _rows)
+                    if (existingRow != null && existingRow.Kind == 4 && existingRow.FeatureId == item.Feature.FeatureId)
+                    { exists = true; break; }
                 if (exists) continue;
-                if (!_featureHeaderAdded)
-                {
-                    var header = NewRowRoot("FeaturePluginSection", _rowHeight);
-                    MakeLabel(header, "Text", "BepInEx 功能插件", _rowLabelStyle, 24f);
-                    header.GetComponent<UnityEngine.UI.Image>().raycastTarget = false;
-                    _rows.Add(new Row { Kind = 3, RootRt = header });
-                    _featureHeaderAdded = true;
-                }
                 var rt = NewRowRoot("FeaturePluginRow", FeatureRowHeight);
                 string text = FeatureLabel(item.Feature);
                 var label = MakeLabel(rt, "Text", text, _rowLabelStyle, 140f);
@@ -2181,6 +2412,7 @@ namespace LocalModManager
             if (added) Relayout();
         }
 
+        /// <summary>Two-line label: "Name  vX  [State]" + StatusMessage (or Description).</summary>
         private static string FeatureLabel(IManagedFeaturePlugin feature)
         {
             string description = feature.Description ?? "";
@@ -2287,6 +2519,8 @@ namespace LocalModManager
             {
                 if (row.Kind == 4)
                 {
+                    // Feature rows never touch the mod registry: the owning plugin
+                    // decides what the toggle means (see IManagedFeaturePlugin).
                     if (!FeaturePluginRegistry.SetEnabled(row.FeatureId, !row.On))
                         Plugin.Logger.LogWarning("[FEATURES] no feature accepted request: " + row.FeatureId);
                     return;
@@ -2298,7 +2532,7 @@ namespace LocalModManager
                     if (row.IsPackage)
                     {
                         // master switch: apply to every unit of the package
-                        foreach (var p in ManagerBehaviour.CurrentSnapshot(mb))
+                        foreach (var p in mb.CurrentSnapshot())
                         {
                             if (p == null || p.ModId != row.ModId || p.Units == null) continue;
                             foreach (var un in p.Units)
@@ -2323,7 +2557,7 @@ namespace LocalModManager
         {
             try
             {
-                foreach (var p in ManagerBehaviour.CurrentSnapshot(mb))
+                foreach (var p in mb.CurrentSnapshot())
                 {
                     if (p == null || p.ModId != modId || p.Units == null) continue;
                     foreach (var un in p.Units)
@@ -2352,6 +2586,7 @@ namespace LocalModManager
                         row.Label.text = row.LabelText;
                     if (row.Kind == 4)
                     {
+                        // Live state comes from the feature itself, not from the registry.
                         foreach (var item in FeaturePluginRegistry.Current)
                         {
                             if (item.Feature.FeatureId != row.FeatureId) continue;
@@ -2613,9 +2848,9 @@ namespace LocalModManager
 
         private static bool _done;
 
-        /// <summary>The test package lives in the user's LocalLow folder, which moved
-        /// with the machine (v5 hardcoded %USERPROFILE%). Resolve it from the
-        /// current profile so the same build works on any account.</summary>
+        /// <summary>The test package lives in the user's LocalLow folder. Resolve it from the
+        /// current profile so the same build works on any account and no account name is
+        /// baked into the assembly (v14: the old literal fallback was removed).</summary>
         internal static string DefaultDir
         {
             get
@@ -2627,13 +2862,169 @@ namespace LocalModManager
                         return Path.Combine(p, @"AppData\LocalLow\Nuverse\WorldApart\Mods\local.expvideo");
                 }
                 catch { }
-                return @"%USERPROFILE%\AppData\LocalLow\Nuverse\WorldApart\Mods\local.expvideo";
+                // v14: 兜底不再写死账户名；退到临时目录下的同名结构（只在 MOD_EXP_VIDEO 调试时用到）
+                try { return Path.Combine(Path.GetTempPath(), "Nuverse", "WorldApart", "Mods", "local.expvideo"); }
+                catch { return "local.expvideo"; }
             }
         }
 
-        /// <summary>Called from Plugin.Load when MOD_EXP_VIDEO=1: hooks the game's own
-        /// video-loading resolver so a real playback records that it consulted the
-        /// AssetOverlay override. Not installed otherwise.</summary>
+        /// <summary>MOD_EXP_VIDEO=2：只装 resolver 观察钩子，**不做任何自注册**
+        /// （v11 P1 验证游戏自带官方通道用）。
+        /// MOD_EXP_CHANNEL=&lt;bundlePath&gt;：用游戏自己的 `VideoBundlePlayer.LoadBundle` 驱动一次
+        /// 官方加载链（会经过 `ResolveResourcePath`），20 s 后 `UnloadBundle` 回收；
+        /// 全程不碰 `AssetOverlay` 注册表。</summary>
+        internal static readonly bool HookOnly =
+            Environment.GetEnvironmentVariable("MOD_EXP_VIDEO") == "2";
+
+        private static readonly string Channel =
+            Environment.GetEnvironmentVariable("MOD_EXP_CHANNEL");
+
+        private static int _chStep;
+        private static float _chAt;
+        private static Il2CppSystem.Threading.Tasks.Task<bool> _chTask;
+
+        /// <summary>官方通道驱动（只在 MOD_EXP_VIDEO=2 + MOD_EXP_CHANNEL 设置时工作）。</summary>
+        internal static void ChannelTick()
+        {
+            if (!HookOnly || string.IsNullOrEmpty(Channel)) return;
+            try
+            {
+                if (_chStep == 0) { _chAt = Time.unscaledTime + 20f; _chStep = 1; return; }
+                if (Time.unscaledTime < _chAt) return;
+                if (_chStep == 1)
+                {
+                    _chStep = 2; _chAt = Time.unscaledTime + 8f;
+                    // 先做只读体检：官方通道到底注册了没有
+                    bool before = false;
+                    try { string d; before = Game.Mod.AssetOverlay.TryResolveVideoOverride(Channel, out d); }
+                    catch (Exception e) { Plugin.Logger.LogWarning("[EXP-CH] TryResolveVideoOverride 异常 " + e.Message); }
+                    Plugin.Logger.LogInfo("[EXP-CH] 体检: IsWorldLoaded=" + Game.Mod.ModOverlayCoordinator.IsWorldLoaded
+                                          + " HasAnyOverride=" + Game.Mod.AssetOverlay.HasAnyOverride
+                                          + " TryResolveVideoOverride('" + Channel + "') BEFORE=" + before);
+                    // 逐层体检官方收集链：ActiveUnits(AssetOverride) → 每个 unit 的 RootDir → CollectOverrides
+                    try
+                    {
+                        var reg = Game.Mod.ModRegistry.Instance;
+                        var units = reg == null ? null : reg.ActiveUnits(Game.Mod.ModUnitType.AssetOverride);
+                        Plugin.Logger.LogInfo("[EXP-CH] ActiveUnits(AssetOverride)=" + (units == null ? -1 : units.Count));
+                        // 逐个 unit 体检（不看 ActiveUnits 的过滤，直接看注册表原始状态）
+                        try
+                        {
+                            // 与插件 PackageSnapshot 同款：Reg.Packages 是 Il2Cpp 只读列表代理，
+                            // 直接 Count 不可靠，先 TryCast 成 List 再枚举。
+                            var ro = reg == null ? null : reg.Packages;
+                            var lst = ro == null ? null : ro.TryCast<Il2CppSystem.Collections.Generic.List<Game.Mod.ModPackage>>();
+                            Plugin.Logger.LogInfo("[EXP-CH] Packages 代理=" + (ro == null ? "null" : ro.GetType().Name)
+                                                  + " TryCastList=" + (lst == null ? "null" : lst.Count.ToString()));
+                            if (lst != null)
+                                for (int pi = 0; pi < lst.Count; pi++)
+                                {
+                                    var p = lst[pi];
+                                    if (p == null) continue;
+                                    var pkUnits = p.Units;
+                                    Plugin.Logger.LogInfo("[EXP-CH]   raw pkg=" + p.ModId + " kind=" + p.Kind
+                                                          + " units=" + (pkUnits == null ? -1 : pkUnits.Count));
+                                    if (pkUnits == null) continue;
+                                    for (int ui = 0; ui < pkUnits.Count; ui++)
+                                    {
+                                        var u = pkUnits[ui];
+                                        if (u == null) continue;
+                                        bool en = false;
+                                        try { en = reg.IsEntryEnabled(p.ModId, u.UnitId, u.TargetNpcId); } catch { }
+                                        bool ex = false;
+                                        try { ex = System.IO.Directory.Exists(u.RootDir); } catch { }
+                                        Plugin.Logger.LogInfo("[EXP-CH]     raw unit unit=" + u.UnitId
+                                                              + " type=" + u.Type + " npc=" + u.TargetNpcId
+                                                              + " root='" + u.RootDir + "' exists=" + ex
+                                                              + " IsEntryEnabled=" + en);
+                                    }
+                                }
+                        }
+                        catch (Exception e4) { Plugin.Logger.LogWarning("[EXP-CH] raw unit 体检异常 " + e4.GetType().Name + ": " + e4.Message); }
+                        if (units != null)
+                            for (int i = 0; i < units.Count; i++)
+                            {
+                                var u = units[i].Item2;
+                                bool ex = false;
+                                try { ex = System.IO.Directory.Exists(u.RootDir); } catch { }
+                                Plugin.Logger.LogInfo("[EXP-CH]   unit=" + u.UnitId + " type=" + u.Type
+                                                      + " root='" + u.RootDir + "' exists=" + ex);
+                                try
+                                {
+                                    var ov = Game.Mod.ModAssetApplier.CollectOverrides(u.RootDir);
+                                    Plugin.Logger.LogInfo("[EXP-CH]   CollectOverrides('" + u.RootDir + "') -> "
+                                                          + (ov == null ? -1 : ov.Count));
+                                    if (ov != null)
+                                        for (int k = 0; k < ov.Count && k < 6; k++)
+                                            Plugin.Logger.LogInfo("[EXP-CH]     entry key='" + ov[k].Key
+                                                                  + "' isVideo=" + ov[k].IsVideoBundle
+                                                                  + " hasSeg=" + ov[k].HasSegmentsJson
+                                                                  + " path='" + ov[k].AbsolutePath + "'");
+                                }
+                                catch (Exception e3) { Plugin.Logger.LogWarning("[EXP-CH]   CollectOverrides 异常 " + e3.Message); }
+                            }
+                    }
+                    catch (Exception e2) { Plugin.Logger.LogWarning("[EXP-CH] ActiveUnits 体检异常 " + e2.Message); }
+                    if (!before)
+                    {
+                        // 官方扫描没自动跑（harness 直调载档绕过了游戏的入世界事件）→
+                        // 用游戏自己的 Sync() 手动触发一次官方通道（计划书允许"触发 Rescan"）
+                        Plugin.Logger.LogInfo("[EXP-CH] 官方扫描未自动发生，调 ModOverlayCoordinator.Sync()（官方触发）");
+                        try { Game.Mod.ModOverlayCoordinator.Sync(); }
+                        catch (Exception e) { Plugin.Logger.LogWarning("[EXP-CH] Sync 异常 " + e.Message); }
+                        bool after = false;
+                        try { string d2; after = Game.Mod.AssetOverlay.TryResolveVideoOverride(Channel, out d2); }
+                        catch { }
+                        Plugin.Logger.LogInfo("[EXP-CH] Sync 之后 TryResolveVideoOverride('" + Channel + "') = " + after
+                                              + " HasAnyOverride=" + Game.Mod.AssetOverlay.HasAnyOverride);
+                    }
+                    return;
+                }
+                if (_chStep == 2)
+                {
+                    _chStep = 3; _chAt = Time.unscaledTime + 25f;
+                    var p = UnityEngine.Object.FindObjectOfType<Game.VideoResourcePlayer>();
+                    if (p == null) { Plugin.Logger.LogWarning("[EXP-CH] 场景里没有 VideoResourcePlayer 实例"); return; }
+                    Plugin.Logger.LogInfo("[EXP-CH] 调游戏自己的 VideoBundlePlayer.LoadBundle('" + Channel + "')");
+                    var t = p.LoadBundle(Channel);
+                    _chTask = t;
+                    Plugin.Logger.LogInfo("[EXP-CH] LoadBundle 任务已返回 type=" + (t == null ? "null" : t.GetType().Name)
+                                          + "（结果在下一轮体检打印）");
+                    return;
+                }
+                if (_chStep == 3)
+                {
+                    _chStep = 4;
+                    try
+                    {
+                        if (_chTask == null) Plugin.Logger.LogWarning("[EXP-CH] 任务缺失");
+                        else Plugin.Logger.LogInfo("[EXP-CH] LoadBundle 结果: IsCompleted=" + _chTask.IsCompleted
+                                                   + " IsFaulted=" + _chTask.IsFaulted
+                                                   + " Result=" + (_chTask.IsCompleted && !_chTask.IsFaulted
+                                                                   ? _chTask.Result.ToString() : "<pending/faulted>"));
+                    }
+                    catch (Exception e5) { Plugin.Logger.LogWarning("[EXP-CH] 任务结果读取异常 " + e5.Message); }
+                }
+                if (_chStep == 4)
+                {
+                    _chStep = 5;
+                    var p = UnityEngine.Object.FindObjectOfType<Game.VideoResourcePlayer>();
+                    if (p == null) { Plugin.Logger.LogWarning("[EXP-CH] 卸载时找不到实例"); return; }
+                    Plugin.Logger.LogInfo("[EXP-CH] 调 UnloadBundle('" + Channel + "')（可逆性）");
+                    p.UnloadBundle(Channel);
+                }
+            }
+            catch (Exception e)
+            {
+                var inner = e.InnerException ?? e;
+                Plugin.Logger.LogWarning("[EXP-CH] 失败 " + inner.GetType().Name + ": " + inner.Message);
+                _chStep = 9;
+            }
+        }
+
+        /// <summary>Called from Plugin.Load when MOD_EXP_VIDEO=1 or =2: hooks the game's own
+        /// video-loading resolver so a real playback records which directory it consulted.
+        /// Not installed otherwise. =2 never touches the AssetOverlay override registry.</summary>
         internal static void Install()
         {
             try
@@ -2734,913 +3125,6 @@ namespace LocalModManager
         }
     }
 
-    // =====================================================================
-    // S3: F9 runtime debug tool  (see KIMI\实施报告v6r2.md)
-    //
-    // Three tabs - quest jump / player values / npc social - that write RUNTIME
-    // state only. Nothing here opens, edits or deletes a save file, but the game's
-    // own autosave can pick the results up, which is why the window carries a red
-    // backup warning.
-    //
-    // Cost model (the plan requires "closed = zero cost"):
-    //   MOD_DEBUG=0        -> the single call site returns on its first line
-    //   enabled + closed   -> one IMGUI key-event check
-    //   open               -> table rows are cached in managed lists, so no
-    //                         per-frame cross-interop enumeration happens
-    // Exceptions are caught per action and logged; a failed action never takes
-    // the game down.
-    // =====================================================================
-    static class DebugTool
-    {
-        internal static readonly bool Enabled =
-            Environment.GetEnvironmentVariable("MOD_DEBUG") != "0";
-
-        /// <summary>
-        /// MOD_DEBUG_SELFTEST=1 makes the tool exercise one representative action
-        /// per tab once, logging before/after and restoring every value it touched,
-        /// so the evidence can be captured without anyone clicking the window.
-        /// </summary>
-        internal static readonly bool SelfTest =
-            Environment.GetEnvironmentVariable("MOD_DEBUG_SELFTEST") == "1";
-
-        private static bool _stDone;
-        internal static bool Show;
-
-        private const string Warn =
-            "【存档风险】本工具只改运行时状态，不改存档文件；但游戏自动存档可能把改动写进存档，请先备份存档！";
-
-        private static int _tab;
-        private static Vector2 _scroll;
-        private static string _status = "(就绪)";
-        private static int _ops;
-
-        private struct QuestRow { public int Id; public string Name; public string Group; }
-        private struct NpcRow { public int Id; public string Name; public string Title; }
-
-        private static List<QuestRow> _qRows;
-        private static List<string> _qView;
-        private static string _qSearch = "";
-        private static int _qSel = -1;
-
-        private static List<NpcRow> _nRows;
-        private static List<string> _nView;
-        private static string _nSearch = "";
-        private static int _nSel = -1;
-
-        private static string _itemId = "";
-        private static string _itemQty = "1000";
-        private static string _attrId = "";
-        private static string _attrVal = "100";
-        private static string _intimacy = "100";
-        private static string _spaceId = "10001";
-        private static readonly string[,] _spacePresets = new string[,]
-        {
-            { "10001", "客栈大堂" }, { "100", "河望镇" }, { "120", "砚州" },
-            { "12006", "比武场" }, { "444444", "荒野岔口" },
-        };
-        private static string _teleportReason;
-
-        private static string SpaceShortcuts()
-        {
-            // 取自 KIMI\release\example_template\常见ID速查表.md
-            return "10001 客栈大堂 | 100 河望镇 | 120 砚州 | 12006 比武场 | 444444 荒野岔口(测试空间)";
-        }
-
-        private static void Log(string s)
-        {
-            _status = s;
-            _ops++;
-            Observe(s);
-            Plugin.Logger.LogInfo("[DBG] " + s);
-        }
-
-        private static void Fail(string what, Exception e) { Log(what + " 失败: " + e.Message); }
-
-        private static int Int(string s, int fallback)
-        {
-            int v;
-            return int.TryParse(s, out v) ? v : fallback;
-        }
-
-        /// <summary>The one and only call site hook (ManagerBehaviour.OnGUI).</summary>
-        internal static void OnGui()
-        {
-            if (!Enabled) return;                       // MOD_DEBUG=0 -> zero cost
-            var e = Event.current;
-            if (e != null && e.type == EventType.KeyDown && e.keyCode == KeyCode.F9)
-            {
-                Show = !Show;
-                e.Use();
-            }
-            // P0 write-test driver: same single call site, no-op unless MOD_DEBUG_WRITETEST is set.
-            WriteTest.Tick();
-            DebugActions.Tick();                        // P1/P2 selftest driver (MOD_DEBUG_JUMPSELFTEST)
-            ReadOnlyLoad.Tick();                        // P3/P4 cast: read-only slot load (MOD_DEBUG_LOADONLY)
-            // MOD_DEBUG_SELFTEST=1 drives the same code paths headlessly so the evidence
-            // can be captured without anyone clicking the window. It rides this single call
-            // site on purpose; there is no second hook.
-            if (SelfTest && !_stDone && !TableReady()) return;   // keep polling until tables exist
-            if (SelfTest && !_stDone)
-            {
-                _stDone = true;
-                try { RunSelfTest(); }
-                catch (Exception ex) { Plugin.Logger.LogWarning("[DBG] selftest failed: " + ex); }
-            }
-            if (!Show) return;                          // closed -> one key check only
-            try { DrawWindow(); }
-            catch (Exception ex) { Plugin.Logger.LogWarning("[DBG] draw failed: " + ex); }
-        }
-
-        private static void DrawWindow()
-        {
-            LoadUiPrefs();
-            GUI.skin.label.fontSize = 13;
-            GUI.skin.button.fontSize = 13;
-            GUI.skin.textField.fontSize = 13;
-            // IMGUI: the window rect is kept in a static so dragging persists, and is
-            // persisted to BepInEx/config so position/size survive a restart (P3).
-            _win = GUI.Window(0x4B44, _win, (GUI.WindowFunction)Body, "剧情调试 (F9)");
-            SaveUiPrefsIfDue();
-        }
-
-        private static Rect _win = new Rect(360f, 60f, 660f, 560f);
-        private static bool _rectLoaded;
-        private static float _rectNextSave;
-        private static Rect _rectSaved;
-
-        private static string UiPrefsPath()
-        {
-            try { return System.IO.Path.Combine(BepInEx.Paths.ConfigPath, "LocalModManager.debugui.txt"); }
-            catch { return null; }
-        }
-
-        /// <summary>窗口位置/尺寸记忆（P3）：第一次绘制时从 BepInEx\config 读回。</summary>
-        private static void LoadUiPrefs()
-        {
-            if (_rectLoaded) return;
-            _rectLoaded = true;
-            try
-            {
-                string p = UiPrefsPath();
-                if (p == null || !System.IO.File.Exists(p)) return;
-                var t = System.IO.File.ReadAllText(p).Trim().Split(' ');
-                if (t.Length != 4) return;
-                float x, y, w, h;
-                if (float.TryParse(t[0], out x) && float.TryParse(t[1], out y)
-                    && float.TryParse(t[2], out w) && float.TryParse(t[3], out h)
-                    && w >= 480f && h >= 360f)
-                {
-                    _win = new Rect(x, y, w, h);
-                    Plugin.Logger.LogInfo("[DBG] 已恢复窗口位置 " + _win);
-                }
-            }
-            catch (Exception e) { Plugin.Logger.LogWarning("[DBG] 读取窗口位置失败: " + e.Message); }
-        }
-
-        private static void SaveUiPrefsIfDue()
-        {
-            if (Time.unscaledTime < _rectNextSave) return;
-            _rectNextSave = Time.unscaledTime + 5f;
-            if (_win.x == _rectSaved.x && _win.y == _rectSaved.y
-                && _win.width == _rectSaved.width && _win.height == _rectSaved.height) return;
-            try
-            {
-                string p = UiPrefsPath();
-                if (p == null) return;
-                System.IO.File.WriteAllText(p, _win.x + " " + _win.y + " " + _win.width + " " + _win.height);
-                _rectSaved = _win;
-            }
-            catch (Exception e) { Plugin.Logger.LogWarning("[DBG] 保存窗口位置失败: " + e.Message); }
-        }
-
-        private static void Body(int id)
-        {
-            GUILayout.BeginVertical();
-
-            var warn = new GUIStyle(GUI.skin.label);
-            warn.normal.textColor = Color.red;
-            warn.wordWrap = true;
-            warn.fontSize = 13;
-            GUILayout.Label(Warn, warn);
-
-            GUILayout.Label("已执行操作: " + _ops + "   |   " + _status);
-            if (WriteTest.Phase > 0) GUILayout.Label("[写入测试 phase=" + WriteTest.Phase + "] " + WriteTest.Status);
-            if (DebugActions.SelfTest) GUILayout.Label("[P1/P2 联测] " + DebugActions.Status);
-
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Toggle(_tab == 0, " 剧情跳跃 ", GUILayout.ExpandWidth(false))) _tab = 0;
-            if (GUILayout.Toggle(_tab == 1, " 玩家参数 ", GUILayout.ExpandWidth(false))) _tab = 1;
-            if (GUILayout.Toggle(_tab == 2, " NPC 社交 ", GUILayout.ExpandWidth(false))) _tab = 2;
-            GUILayout.EndHorizontal();
-
-            GUILayout.Space(4);
-            var writable = Player() != null;
-            // 左：执行区   右：观察区（P3 分栏）
-            GUILayout.BeginHorizontal(GUILayout.ExpandHeight(true));
-
-            GUILayout.BeginVertical(GUILayout.Width(392f));
-            _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.ExpandHeight(true));
-            if (_tab == 0) QuestTab();
-            else if (_tab == 1) PlayerTab();
-            else NpcTab();
-            GUILayout.EndScrollView();
-            GUILayout.EndVertical();            // 执行区
-
-            GUILayout.BeginVertical(GUILayout.ExpandWidth(true));
-            GUILayout.Label("观察区（最近 " + _obs.Count + " 条）");
-            _obsScroll = GUILayout.BeginScrollView(_obsScroll, GUILayout.ExpandHeight(true));
-            for (int i = 0; i < _obs.Count; i++) GUILayout.Label(_obs[i]);
-            GUILayout.EndScrollView();
-            GUILayout.EndVertical();            // 观察区
-
-            GUILayout.EndHorizontal();
-
-            // P3 尺寸记忆：右下角 20x20 拖动条
-            var gizmo = new Rect(_win.width - 20f, _win.height - 20f, 20f, 20f);
-            GUI.Box(gizmo, "");
-            var ev = Event.current;
-            if (ev != null && (ev.type == EventType.MouseDrag || ev.type == EventType.MouseDown)
-                && gizmo.Contains(ev.mousePosition))
-            {
-                _win.width = Mathf.Max(480f, _win.width + ev.delta.x);
-                _win.height = Mathf.Max(360f, _win.height + ev.delta.y);
-                ev.Use();
-            }
-
-            GUILayout.EndVertical();
-            GUI.DragWindow();
-        }
-
-        // ------------------------------------------------------- observation pane
-        private static readonly List<string> _obs = new List<string>();
-        private static Vector2 _obsScroll;
-        private const int ObsMax = 400;
-
-        /// <summary>Append one line to the observation pane (called by Log and by WriteTest).</summary>
-        internal static void Observe(string line)
-        {
-            _obs.Add(line);
-            if (_obs.Count > ObsMax) _obs.RemoveRange(0, _obs.Count - ObsMax);
-            _obsScroll.y = float.MaxValue;      // keep the newest line in view
-        }
-
-        // ---------------------------------------------------------------- quest
-        private static void EnsureQuests()
-        {
-            if (_qRows != null) return;
-            _qRows = new List<QuestRow>();
-            try
-            {
-                var list = Game.ConfigManager.Instance.Tables.TbQuest.DataList;
-                for (int i = 0; i < list.Count; i++)
-                {
-                    var q = list[i];
-                    if (q == null) continue;
-                    string nm = "";
-                    try { nm = q.name.GetText("zh-Hans"); } catch { }
-                    _qRows.Add(new QuestRow { Id = q.id.Value, Name = nm ?? "", Group = q.taskGroup ?? "" });
-                }
-                Log("任务表已载入: " + _qRows.Count + " 行");
-            }
-            catch (Exception ex) { Fail("载入任务表", ex); }
-        }
-
-        private static void QuestTab()
-        {
-            EnsureQuests();
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("搜索(id/名称/章节):", GUILayout.ExpandWidth(false));
-            var s = GUILayout.TextField(_qSearch ?? "", GUILayout.Width(280));
-            if (s != _qSearch) { _qSearch = s; _qView = null; }
-            GUILayout.EndHorizontal();
-
-            if (_qView == null) BuildQuestView();
-            GUILayout.Label("匹配 " + _qView.Count + " 项（显示前 200）");
-            for (int i = 0; i < _qView.Count; i++)
-            {
-                bool sel = _qSel == i;
-                if (GUILayout.Toggle(sel, _qView[i], GUILayout.ExpandWidth(false))) { _qSel = i; }
-            }
-            if (_qRows == null || _qSel < 0 || _qSel >= _qRows.Count) return;
-            var row = _qRows[_qSel];
-
-            GUILayout.Space(6);
-            GUILayout.Label("选中: " + row.Id + "  " + row.Name + "   [" + row.Group + "]");
-            GUILayout.Label("当前状态: " + QuestStateOf(row.Id));
-
-            bool canWrite = Player() != null;
-            if (!canWrite) GUILayout.Label("【只读】未载入存档：写入按钮已灰显，先在游戏内载入存档");
-            bool prevW = GUI.enabled;
-            GUI.enabled = canWrite;
-
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("接受任务", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    var qm = Game.QuestManager.Instance;
-                    string before = QuestStateOf(row.Id);
-                    bool ok = qm.DebugForceAcceptQuest(new LubanDatas.TbQuestId(row.Id));
-                    Log("接受任务 " + row.Id + ": " + before + " -> " + QuestStateOf(row.Id) + " (rc=" + ok + ")");
-                }
-                catch (Exception ex) { Fail("接受任务", ex); }
-            }
-            if (GUILayout.Button("完成当前步骤", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    var qm = Game.QuestManager.Instance;
-                    var cfg = qm.GetQuestConfig(new LubanDatas.TbQuestId(row.Id));
-                    int n = (cfg == null || cfg.objectives == null) ? 0 : cfg.objectives.Count;
-                    int idx = -1;
-                    for (int i = 0; i < n; i++)
-                        if (!qm.IsObjectiveSettled(new LubanDatas.TbQuestId(row.Id), i)) { idx = i; break; }
-                    if (idx < 0) { Log("完成当前步骤: 没有未结算的步骤 (objectives=" + n + ")"); }
-                    else
-                    {
-                        qm.SettleObjectiveFromFlowVm(new LubanDatas.TbQuestId(row.Id), idx);
-                        Log("完成步骤 " + row.Id + " #" + idx + " -> " + QuestStateOf(row.Id));
-                    }
-                }
-                catch (Exception ex) { Fail("完成当前步骤", ex); }
-            }
-            if (GUILayout.Button("完成任务", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    var qm = Game.QuestManager.Instance;
-                    string before = QuestStateOf(row.Id);
-                    qm.DebugForceCompleteQuest(new LubanDatas.TbQuestId(row.Id));
-                    Log("完成任务 " + row.Id + ": " + before + " -> " + QuestStateOf(row.Id));
-                }
-                catch (Exception ex) { Fail("完成任务", ex); }
-            }
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("提交任务", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    var qm = Game.QuestManager.Instance;
-                    string before = QuestStateOf(row.Id);
-                    bool ok = qm.SubmitQuest(new LubanDatas.TbQuestId(row.Id));
-                    Log("提交任务 " + row.Id + ": " + before + " -> " + QuestStateOf(row.Id) + " (rc=" + ok + ")");
-                }
-                catch (Exception ex) { Fail("提交任务", ex); }
-            }
-            if (GUILayout.Button("清除任务记录", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    var qm = Game.QuestManager.Instance;
-                    string before = QuestStateOf(row.Id);
-                    bool ok = qm.RemoveQuestRecord(new LubanDatas.TbQuestId(row.Id));
-                    Log("清除记录 " + row.Id + ": " + before + " -> " + QuestStateOf(row.Id) + " (rc=" + ok + ")");
-                }
-                catch (Exception ex) { Fail("清除记录", ex); }
-            }
-            GUILayout.EndHorizontal();
-            GUI.enabled = prevW;
-
-            // P1 空间传送 / P2 剧情跳跃：只有在载入存档后才可用，未载入时灰显并说明原因
-            GUILayout.Space(6);
-            GUILayout.Label("—— 空间传送（P1）——");
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("spaceId:", GUILayout.ExpandWidth(false));
-            _spaceId = GUILayout.TextField(_spaceId ?? "", GUILayout.Width(90));
-            GUI.enabled = canWrite;
-            if (GUILayout.Button("传送", GUILayout.ExpandWidth(false)))
-            {
-                int sid = Int(_spaceId, -1);
-                if (sid < 0) Log("传送：spaceId 非法");
-                else DebugActions.Teleport(sid, true, true);
-            }
-            GUI.enabled = prevW;
-            GUILayout.EndHorizontal();
-            GUILayout.Label("常用: " + string.Join(" | ", SpaceShortcuts()), GUILayout.ExpandWidth(false));
-            GUILayout.BeginHorizontal();
-            GUI.enabled = canWrite;
-            for (int i = 0; i < _spacePresets.Length; i++)
-            {
-                if (GUILayout.Button(_spacePresets[i, 1] + "(" + _spacePresets[i, 0] + ")", GUILayout.ExpandWidth(false)))
-                {
-                    _spaceId = _spacePresets[i, 0];
-                    DebugActions.Teleport(Int(_spaceId, -1), true, true);
-                }
-            }
-            GUI.enabled = prevW;
-            GUILayout.EndHorizontal();
-            GUILayout.Label("当前 " + DebugActions.SpaceIdText() + "（GotoSpace 为异步提交，迁移在 OnUpdate 跑完）");
-
-            GUILayout.Space(6);
-            GUILayout.Label("—— 剧情跳跃（P2，走 QuestManager.TryStartQuestProc）——");
-            GUILayout.Label("任务 " + row.Id + " 的 flow: " + DebugActions.QuestFlowIds(row.Id));
-            GUILayout.BeginHorizontal();
-            GUI.enabled = canWrite;
-            if (GUILayout.Button("执行该任务剧情流程", GUILayout.ExpandWidth(false)))
-            {
-                DebugActions.StartQuestProc(row.Id);
-            }
-            GUI.enabled = prevW;
-            GUILayout.EndHorizontal();
-
-            // 传送按钮的历史灰显原因（保留在窗口里，说明为什么不走 GotoSpaceCommand）
-            GUILayout.Space(4);
-            GUILayout.Label("  说明: " + (_teleportReason ?? TeleportReason()));
-
-            GUILayout.Space(4);
-            GUILayout.Label("任务状态枚举: " + Game.Model.QuestState.InProgress);
-        }
-
-        private static string QuestStateOf(int id)
-        {
-            try { return Game.QuestManager.Instance.GetQuestState(new LubanDatas.TbQuestId(id)).ToString(); }
-            catch (Exception e) { return "<读取失败:" + e.Message + ">"; }
-        }
-
-        private static string TeleportReason()
-        {
-            _teleportReason =
-                "P1 落地路线: SpaceManager.GotoSpace(TbSpaceId?, …) —— 地图旅行链的真实终点前一步"
-                + "(BaseMapPoi.StartPoiTransferCore → SpaceManager.GotoSpaceInstance)，不需要 ProcContext。"
-                + "旧路线 GotoSpaceCommand 已排除: 它的 ExecuteAsync(ProcContext) 只能由 FlowScheduler 虚调用，"
-                + "且全镜像无直接调用者。直接调 GotoSpace 会跳过旅行耗时结算、引导提示与离场确认弹窗。";
-            return _teleportReason;
-        }
-
-        private static void BuildQuestView()
-        {
-            _qView = new List<string>();
-            if (_qRows == null) return;
-            string f = (_qSearch ?? "").Trim().ToLowerInvariant();
-            for (int i = 0; i < _qRows.Count && _qView.Count < 200; i++)
-            {
-                var r = _qRows[i];
-                if (f.Length > 0)
-                {
-                    string hay = r.Id + " " + (r.Name ?? "") + " " + (r.Group ?? "");
-                    if (hay.ToLowerInvariant().IndexOf(f) < 0) continue;
-                }
-                _qView.Add(r.Id + "  " + r.Name + "   [" + r.Group + "]");
-            }
-        }
-
-        // --------------------------------------------------------------- player
-        private static void PlayerTab()
-        {
-            GUILayout.Label("当前玩家/世界: " + PlayerDesc());
-
-            GUILayout.Space(4);
-            GUILayout.Label("—— 货币 / 消耗品（读写背包物品）——");
-            bool canWrite = Player() != null;
-            if (!canWrite) GUILayout.Label("【只读】未载入存档：写入按钮已灰显，先在游戏内载入存档");
-            bool prevW = GUI.enabled;
-            GUI.enabled = canWrite;
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("物品 id:", GUILayout.ExpandWidth(false));
-            _itemId = GUILayout.TextField(_itemId ?? "", GUILayout.Width(100));
-            GUILayout.Label("数量:", GUILayout.ExpandWidth(false));
-            _itemQty = GUILayout.TextField(_itemQty ?? "", GUILayout.Width(80));
-            if (GUILayout.Button("读取", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    int id = Int(_itemId, -1);
-                    long c = Bag().GetItemCount(new LubanDatas.TbItemId(id));
-                    Log("物品 " + id + " 当前数量 = " + c);
-                }
-                catch (Exception ex) { Fail("读取物品", ex); }
-            }
-            if (GUILayout.Button("添加", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    int id = Int(_itemId, -1), n = Int(_itemQty, 0);
-                    long before = Bag().GetItemCount(new LubanDatas.TbItemId(id));
-                    Bag().AddItem(new LubanDatas.TbItemId(id), n, Game.Model.ItemSourceType.GMCommand, null, null);
-                    long after = Bag().GetItemCount(new LubanDatas.TbItemId(id));
-                    Log("添加物品 " + id + " x" + n + ": " + before + " -> " + after);
-                }
-                catch (Exception ex) { Fail("添加物品", ex); }
-            }
-            if (GUILayout.Button("移除", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    int id = Int(_itemId, -1), n = Int(_itemQty, 0);
-                    var bag = Bag();
-                    long before = bag.GetItemCount(new LubanDatas.TbItemId(id));
-                    var item = FindBagItem(bag, id);
-                    if (item == null) { Log("移除物品 " + id + ": 背包里没有该物品"); }
-                    else
-                    {
-                        bool ok = bag.TryConsumeByUid(item.Uid, item.Count, n, Game.Model.ItemSourceType.GMCommand);
-                        long after = bag.GetItemCount(new LubanDatas.TbItemId(id));
-                        Log("移除物品 " + id + " x" + n + ": " + before + " -> " + after + " (rc=" + ok + ")");
-                    }
-                }
-                catch (Exception ex) { Fail("移除物品", ex); }
-            }
-            if (GUILayout.Button("扫描背包里的货币物品", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    var bag = Bag();
-                    var items = bag.Items;
-                    var seen = new List<string>();
-                    for (int i = 0; i < items.Count && seen.Count < 6; i++)
-                    {
-                        var it = items[i];
-                        if (it == null) continue;
-                        if (!Game.Model.Components.BagModel.IsCurrencyItem(it.ItemId)) continue;
-                        string s = it.ItemId.Value + "(x" + it.Count + ")";
-                        if (!seen.Contains(s)) seen.Add(s);
-                    }
-                    Log("背包货币物品: " + (seen.Count == 0 ? "无" : string.Join(", ", seen.ToArray())));
-                    if (seen.Count > 0 && string.IsNullOrEmpty(_itemId)) _itemId = seen[0].Split('(')[0];
-                }
-                catch (Exception ex) { Fail("扫描背包", ex); }
-            }
-            GUILayout.EndHorizontal();
-
-            GUILayout.Space(6);
-            GUILayout.Label("—— 交互属性（读写玩家属性）——");
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("属性 id:", GUILayout.ExpandWidth(false));
-            _attrId = GUILayout.TextField(_attrId ?? "", GUILayout.Width(100));
-            GUILayout.Label("目标值:", GUILayout.ExpandWidth(false));
-            _attrVal = GUILayout.TextField(_attrVal ?? "", GUILayout.Width(90));
-            if (GUILayout.Button("读取", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    int id = Int(_attrId, -1);
-                    var p = Player();
-                    Log("属性 " + id + " 值 = " + p.GetInteractAttributeValue(new LubanDatas.TbInteractAttributeId(id))
-                        + " / 上限 " + p.GetInteractAttributeMaxValue(new LubanDatas.TbInteractAttributeId(id)));
-                }
-                catch (Exception ex) { Fail("读取属性", ex); }
-            }
-            if (GUILayout.Button("写入", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    int id = Int(_attrId, -1), v = Int(_attrVal, 0);
-                    var p = Player();
-                    int before = p.GetInteractAttributeValue(new LubanDatas.TbInteractAttributeId(id));
-                    p.SetInteractAttributeValue(new LubanDatas.TbInteractAttributeId(id), v);
-                    int after = p.GetInteractAttributeValue(new LubanDatas.TbInteractAttributeId(id));
-                    Log("属性 " + id + ": " + before + " -> " + after + " (目标 " + v + ")");
-                }
-                catch (Exception ex) { Fail("写入属性", ex); }
-            }
-            if (GUILayout.Button("+N", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    int id = Int(_attrId, -1), v = Int(_attrVal, 0);
-                    var p = Player();
-                    int before = p.GetInteractAttributeValue(new LubanDatas.TbInteractAttributeId(id));
-                    p.IncreaseInteractAttributeValue(new LubanDatas.TbInteractAttributeId(id), v);
-                    Log("属性 " + id + ": " + before + " -> "
-                        + p.GetInteractAttributeValue(new LubanDatas.TbInteractAttributeId(id)) + " (+" + v + ")");
-                }
-                catch (Exception ex) { Fail("增加属性", ex); }
-            }
-            GUILayout.EndHorizontal();
-            GUI.enabled = prevW;
-        }
-
-        private static Game.Model.PlayerModel Player()
-        {
-            return Game.Model.GameStoreManager.CurrentPlayer;
-        }
-
-        private static Game.Model.Components.BagModel Bag()
-        {
-            return Player().bag;
-        }
-
-        private static Game.Model.Components.BagItemBase FindBagItem(Game.Model.Components.BagModel bag, int itemId)
-        {
-            var items = bag.Items;
-            for (int i = 0; i < items.Count; i++)
-            {
-                var it = items[i];
-                if (it != null && it.ItemId.Value == itemId) return it;
-            }
-            return null;
-        }
-
-        private static string PlayerDesc()
-        {
-            try
-            {
-                var p = Game.Model.GameStoreManager.CurrentPlayer;
-                var w = Game.Model.GameStoreManager.CurrentGameWorld;
-                if (p == null) return "<无玩家：请先载入存档>";
-                return "玩家已载入, 世界 NPC 数 = " + (w != null && w.NpcModels != null ? w.NpcModels.Count.ToString() : "?");
-            }
-            catch (Exception e) { return "<未载入存档: " + e.Message + ">"; }
-        }
-
-        // ------------------------------------------------------------------ npc
-        private static void EnsureNpcs()
-        {
-            if (_nRows != null) return;
-            _nRows = new List<NpcRow>();
-            try
-            {
-                var list = Game.ConfigManager.Instance.Tables.TbNpcBaseCfg.DataList;
-                for (int i = 0; i < list.Count; i++)
-                {
-                    var r = list[i];
-                    if (r == null) continue;
-                    string nm = "", ti = "";
-                    try { nm = r.npcName.GetText("zh-Hans"); } catch { }
-                    try { ti = r.npcTitle.GetText("zh-Hans"); } catch { }
-                    _nRows.Add(new NpcRow { Id = r.id.Value, Name = nm ?? "", Title = ti ?? "" });
-                }
-                Log("NPC 表已载入: " + _nRows.Count + " 行");
-            }
-            catch (Exception ex) { Fail("载入 NPC 表", ex); }
-        }
-
-        private static void NpcTab()
-        {
-            EnsureNpcs();
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("搜索(id/姓名/称号):", GUILayout.ExpandWidth(false));
-            var s = GUILayout.TextField(_nSearch ?? "", GUILayout.Width(280));
-            if (s != _nSearch) { _nSearch = s; _nView = null; }
-            GUILayout.EndHorizontal();
-
-            if (_nView == null) BuildNpcView();
-            GUILayout.Label("匹配 " + _nView.Count + " 项（显示前 200）");
-            for (int i = 0; i < _nView.Count; i++)
-            {
-                if (GUILayout.Toggle(_nSel == i, _nView[i], GUILayout.ExpandWidth(false))) _nSel = i;
-            }
-            if (_nRows == null || _nSel < 0 || _nSel >= _nRows.Count) return;
-            var row = _nRows[_nSel];
-
-            GUILayout.Space(6);
-            GUILayout.Label("选中: " + row.Id + "  " + row.Name + "  " + row.Title);
-            bool canWriteNpc = Player() != null;
-            if (!canWriteNpc) GUILayout.Label("【只读】未载入存档：亲密度写入已灰显");
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("亲密度增减:", GUILayout.ExpandWidth(false));
-            _intimacy = GUILayout.TextField(_intimacy ?? "", GUILayout.Width(90));
-            if (GUILayout.Button("读取亲密度", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    var npc = FindNpc(row.Id);
-                    if (npc == null) Log("NPC " + row.Id + " 不在当前世界实例中（未生成/未驻留）");
-                    else Log("NPC " + row.Id + " 亲密度 = " + npc.Intimacy + " / " + npc.MaxIntimacy
-                             + "  等级:" + npc.GetIntimacyName());
-                }
-                catch (Exception ex) { Fail("读取亲密度", ex); }
-            }
-            bool prevNpc = GUI.enabled;
-            GUI.enabled = canWriteNpc;
-            if (GUILayout.Button("设置", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    int v = Int(_intimacy, 0);
-                    var npc = FindNpc(row.Id);
-                    if (npc == null) Log("NPC " + row.Id + " 不在当前世界实例中，无法写入");
-                    else
-                    {
-                        int before = npc.Intimacy;
-                        npc.Intimacy = v;
-                        Log("NPC " + row.Id + " 亲密度: " + before + " -> " + npc.Intimacy + " (设置 " + v + ")");
-                    }
-                }
-                catch (Exception ex) { Fail("设置亲密度", ex); }
-            }
-            if (GUILayout.Button("增加", GUILayout.ExpandWidth(false)))
-            {
-                try
-                {
-                    int v = Int(_intimacy, 0);
-                    var npc = FindNpc(row.Id);
-                    if (npc == null) Log("NPC " + row.Id + " 不在当前世界实例中，无法写入");
-                    else
-                    {
-                        int before = npc.Intimacy;
-                        // native path: NpcModel.AddIntimacy(delta, actionType)
-                        npc.AddIntimacy(v, LubanDatas.CommissionAffinityActionType.GIFT);
-                        Log("NPC " + row.Id + " 亲密度(AddIntimacy/GIFT): " + before + " -> " + npc.Intimacy + " (+" + v + ")");
-                    }
-                }
-                catch (Exception ex) { Fail("增加亲密度", ex); }
-            }
-            GUILayout.EndHorizontal();
-            GUI.enabled = prevNpc;
-            GUILayout.Label("注: \"设置\"用 NpcModel.Intimacy 的 public setter（绝对写入，不触发等级/好感事件）；"
-                            + "\"增加\"走官方 NpcModel.AddIntimacy(delta, CommissionAffinityActionType.GIFT)。");
-        }
-
-        private static Game.Model.NpcModel FindNpc(int cfgId)
-        {
-            try
-            {
-                var w = Game.Model.GameStoreManager.CurrentGameWorld;
-                if (w == null) return null;
-                return w.GetNpc(new LubanDatas.TbNpcBaseCfgId(cfgId), true);
-            }
-            catch (Exception e) { Log("GetNpc(" + cfgId + ") 失败: " + e.Message); return null; }
-        }
-
-        private static void BuildNpcView()
-        {
-            _nView = new List<string>();
-            if (_nRows == null) return;
-            string f = (_nSearch ?? "").Trim().ToLowerInvariant();
-            for (int i = 0; i < _nRows.Count && _nView.Count < 200; i++)
-            {
-                var r = _nRows[i];
-                if (f.Length > 0)
-                {
-                    string hay = r.Id + " " + (r.Name ?? "") + " " + (r.Title ?? "");
-                    if (hay.ToLowerInvariant().IndexOf(f) < 0) continue;
-                }
-                _nView.Add(r.Id + "  " + r.Name + "  " + r.Title);
-            }
-        }
-
-        // ------------------------------------------------------------- self test
-        /// <summary>True once the config tables the tool reads are actually built.</summary>
-        private static bool TableReady()
-        {
-            try
-            {
-                var c = Game.ConfigManager.Instance;
-                return c != null && c.Tables != null
-                    && c.Tables.TbQuest != null && c.Tables.TbNpcBaseCfg != null;
-            }
-            catch { return false; }
-        }
-
-        /// <summary>
-        /// Walks every tab once: reads the two tables, filters them, then does one
-        /// write round-trip per tab and puts the value back. Each step is isolated -
-        /// a failure is logged and the remaining steps still run. Only runtime state
-        /// is touched, never a save file.
-        /// </summary>
-        internal static void RunSelfTest()
-        {
-            Log("SELFTEST begin (runtime-only, every write is restored)");
-
-            try { EnsureQuests(); } catch (Exception e) { Fail("SELFTEST 任务表", e); }
-            try { EnsureNpcs(); } catch (Exception e) { Fail("SELFTEST NPC表", e); }
-            Log("SELFTEST 任务表行数=" + (_qRows == null ? -1 : _qRows.Count)
-                + " 首行=" + (_qRows != null && _qRows.Count > 0 ? _qRows[0].Id + " " + _qRows[0].Name : "-"));
-            Log("SELFTEST NPC表行数=" + (_nRows == null ? -1 : _nRows.Count)
-                + " 首行=" + (_nRows != null && _nRows.Count > 0 ? _nRows[0].Id + " " + _nRows[0].Name : "-"));
-
-            try
-            {
-                _qSearch = ""; _qView = null; BuildQuestView();
-                int allQ = _qView.Count;
-                _qSearch = "邪"; _qView = null; BuildQuestView();
-                Log("SELFTEST 任务搜索: 空关键词=" + allQ + " 关键词'邪'=" + _qView.Count
-                    + " 样例=" + (_qView.Count > 0 ? _qView[0] : "-"));
-                _qSearch = ""; _qView = null;
-
-                _nSearch = ""; _nView = null; BuildNpcView();
-                int allN = _nView.Count;
-                _nSearch = "苏"; _nView = null; BuildNpcView();
-                Log("SELFTEST NPC搜索: 空关键词=" + allN + " 关键词'苏'=" + _nView.Count
-                    + " 样例=" + (_nView.Count > 0 ? _nView[0] : "-"));
-                _nSearch = ""; _nView = null;
-            }
-            catch (Exception e) { Fail("SELFTEST 搜索过滤", e); }
-
-            Log("SELFTEST 玩家: " + PlayerDesc());
-            Log("SELFTEST 传送按钮: 已灰掉, 原因=" + TeleportReason());
-
-            var p = Player();
-            if (p == null)
-            {
-                Log("SELFTEST 未载入存档(主菜单): 跳过 属性/货币/亲密度 三个写入往返——只读链路已通过");
-            }
-            else
-            {
-                SelfTestAttribute(p);
-                SelfTestCurrency();
-                SelfTestIntimacy();
-            }
-            Log("SELFTEST done, ops=" + _ops);
-        }
-
-        private static void SelfTestAttribute(Game.Model.PlayerModel p)
-        {
-            try
-            {
-                var attrs = p.interactAttributes;
-                var key = default(LubanDatas.TbInteractAttributeId);
-                string src = "玩家运行时字典 interactAttributes";
-                int count = attrs == null ? 0 : attrs.Count;
-                if (count > 0)
-                {
-                    foreach (var kv in attrs) { key = kv.Key; break; }
-                }
-                else
-                {
-                    // fall back to the config table when the live dict cannot be walked
-                    var rows = Game.ConfigManager.Instance.Tables.TbInteractAttribute.DataList;
-                    if (rows == null || rows.Count == 0)
-                    {
-                        Log("SELFTEST 属性: interactAttributes 与 TbInteractAttribute 都为空, 跳过");
-                        return;
-                    }
-                    key = rows[0].id;
-                    src = "配置表 TbInteractAttribute";
-                }
-                int before = p.GetInteractAttributeValue(key);
-                p.SetInteractAttributeValue(key, before + 10);
-                int after = p.GetInteractAttributeValue(key);
-                p.SetInteractAttributeValue(key, before);
-                int back = p.GetInteractAttributeValue(key);
-                Log("SELFTEST 属性 id=" + key.Value + " (来源=" + src + ", 字典" + count + "项)" + ": " + before
-                    + " -> +10 -> " + after + " -> 还原 " + back + " [还原" + (back == before ? "成功" : "失败") + "]");
-            }
-            catch (Exception e) { Fail("SELFTEST 属性往返", e); }
-        }
-
-        private static void SelfTestCurrency()
-        {
-            try
-            {
-                var bag = Bag();
-                if (bag == null || bag.Items == null)
-                {
-                    Log("SELFTEST 货币: 背包不可用, 跳过");
-                    return;
-                }
-                var items = bag.Items;
-                int itemId = -1;
-                for (int i = 0; i < items.Count; i++)
-                {
-                    var it = items[i];
-                    if (it == null) continue;
-                    if (Game.Model.Components.BagModel.IsCurrencyItem(it.ItemId)) { itemId = it.ItemId.Value; break; }
-                }
-                if (itemId < 0)
-                {
-                    Log("SELFTEST 货币: 背包内没有货币类物品(" + items.Count + " 格), 跳过");
-                    return;
-                }
-                var tid = new LubanDatas.TbItemId(itemId);
-                long before = bag.GetItemCount(tid);
-                bag.AddItem(tid, 1000, Game.Model.ItemSourceType.GMCommand, null, null);
-                long after = bag.GetItemCount(tid);
-                long delta = after - before;
-                string undo = "无可撤销项";
-                if (delta > 0)
-                {
-                    var stack = FindBagItem(bag, itemId);
-                    if (stack != null)
-                    {
-                        bool ok = bag.TryConsumeByUid(stack.Uid, stack.Count, (int)delta, Game.Model.ItemSourceType.GMCommand);
-                        undo = "TryConsumeByUid rc=" + ok;
-                    }
-                }
-                long back = bag.GetItemCount(tid);
-                Log("SELFTEST 货币 item=" + itemId + ": " + before + " -> +1000 -> " + after
-                    + " (delta=" + delta + ", " + undo + ") -> 还原 " + back
-                    + " [还原" + (back == before ? "成功" : "未完全还原") + "]");
-            }
-            catch (Exception e) { Fail("SELFTEST 货币往返", e); }
-        }
-
-        private static void SelfTestIntimacy()
-        {
-            int[] probe = new int[] { 100000, 100001, 100002, 100003 };
-            try
-            {
-                for (int i = 0; i < probe.Length; i++)
-                {
-                    var npc = FindNpc(probe[i]);
-                    if (npc == null) { Log("SELFTEST 亲密度: NPC " + probe[i] + " 不在当前世界实例中"); continue; }
-                    int before = npc.Intimacy;
-                    npc.Intimacy = before + 100;
-                    int after = npc.Intimacy;
-                    npc.Intimacy = before;
-                    int back = npc.Intimacy;
-                    Log("SELFTEST 亲密度 NPC " + probe[i] + ": " + before + " -> +100 -> " + after
-                        + " -> 还原 " + back + " [还原" + (back == before ? "成功" : "失败") + "]");
-                    return;
-                }
-                Log("SELFTEST 亲密度: 探测的 4 个 NPC 都不在世界实例中, 跳过写入");
-            }
-            catch (Exception e) { Fail("SELFTEST 亲密度往返", e); }
-        }
-    }
 
     /// <summary>Q1 recon: one-shot hierarchy dump of the settings panel.</summary>
     static class Q1Recon
@@ -3658,7 +3142,7 @@ namespace LocalModManager
                 _sb.Append("=== Q1 settings-panel hierarchy dump (source=").Append(source)
                    .Append(", ").Append(DateTime.Now.ToString("HH:mm:ss")).Append(") ===\n");
                 Walk(root, 0);
-                string path = Path.Combine(GameRoot(), "KIMI", "v5_q1_recon.txt");
+                string path = Path.Combine(GameRoot(), "v5_q1_recon.txt");   // v14 脱敏：不再写进名为 K 的内部目录
                 File.WriteAllText(path, _sb.ToString(), new UTF8Encoding(false));
                 Plugin.Logger.LogInfo("[Q1] hierarchy dumped to " + path);
             }
@@ -3942,7 +3426,7 @@ namespace LocalModManager
                 }
                 catch { }
                 Logger.LogInfo("Harmony hooks installed (OnGameLoaded watcher + settings entry); patched methods visible=" + patched);
-                Logger.LogInfo("[MODPAGE] build stamp 20261007-0530 v9-tabgate");
+                Logger.LogInfo("[MODPAGE] build stamp 20261007-1930 v13-split");
             }
             catch (Exception e)
             {
@@ -3979,12 +3463,14 @@ namespace LocalModManager
 
             // P6: with MOD_EXP_VIDEO=1 the game's own video resolver is hooked so a
             // real playback records that it consulted the AssetOverlay override.
-            if (VideoExp.Enabled)
+            if (VideoExp.Enabled || VideoExp.HookOnly)
             {
                 try { VideoExp.Install(); }
                 catch (Exception e) { Logger.LogWarning("[EXP] hook install failed: " + e.Message); }
             }
 
+            // v13：传送链追踪钩子（TeleportDiag）与开机观测（BootWatch）随调试代码一起
+            // 迁到独立插件 LocalStoryDebug.dll；MOD 管理器这边不再安装任何调试钩子。
             Logger.LogInfo(PluginName + " " + PluginVersion + " loaded (F10 toggles the window)");
         }
     }
@@ -4111,6 +3597,8 @@ namespace LocalModManager
                 SettingsEntryHook.Maintain();
                 if (!_featureScanTried && Time.time > 5f)
                 {
+                    // v14: one-shot discovery log so "did the page see my feature plugin?"
+                    // is answerable from LogOutput.log without opening F10.
                     _featureScanTried = true;
                     FeaturePluginRegistry.Refresh();
                     var features = new List<string>();
@@ -4201,6 +3689,8 @@ namespace LocalModManager
                 }
 
                 if (_scanTried && Time.time > 25f) VideoExp.Run();
+                if (_scanTried) VideoExp.ChannelTick();   // v11 P1: 官方通道驱动（MOD_EXP_VIDEO=2）
+                if (_scanTried) VideoBridge.Tick();       // v12 P1b: 官方 API 桥接（MOD_EXP_BRIDGE=0 可关）
             }
             catch (Exception e)
             {
@@ -4548,11 +4038,10 @@ namespace LocalModManager
         // ---- internal API for the settings-page MOD manager (S2) ----
 
         /// <summary>Throttled package snapshot, shared with the IMGUI window.</summary>
-        internal static List<ModPackage> CurrentSnapshot(ManagerBehaviour instance)
+        internal List<ModPackage> CurrentSnapshot()
         {
-            if (instance == null) return new List<ModPackage>();
-            instance.RefreshSnapshotIfDue();
-            return instance._snap;
+            RefreshSnapshotIfDue();
+            return _snap;
         }
 
         /// <summary>Toggle one registry entry from the settings-page switch rows.</summary>
@@ -4569,7 +4058,6 @@ namespace LocalModManager
 
         private void OnGUI()
         {
-            DebugTool.OnGui();   // S3: the only debug-tool call site (no-op unless MOD_DEBUG!=0 and F9 opened it)
             if (!_show) return;
             RefreshSnapshotIfDue();
             GUI.skin.label.fontSize = 13;

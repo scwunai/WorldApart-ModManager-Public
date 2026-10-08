@@ -1,16 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
-    <AssemblyName>LocalModManager</AssemblyName>
+    <AssemblyName>LocalStoryDebug</AssemblyName>
     <RootNamespace>LocalModManager</RootNamespace>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
-    <!-- v14 P2: the abstractions contract builds as its own assembly; keep its
-         sources out of this one (audit 6.7: forward slashes, not backslashes). -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);abstractions/**/*.cs</DefaultItemExcludes>
     <!-- P0: no debug metadata, so the assembly carries no build-machine path:
          the release check greps BepInEx\plugins\ for the internal project code name.
          Flip to `portable` when you need line numbers in stack traces during development. -->
@@ -125,7 +122,10 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="abstractions\LocalModManager.Abstractions.csproj">
+    <!-- v14: the story-debug plugin exposes itself to the MOD page as a managed
+         feature (see docs/BepInEx-Feature-Plugin-API.md). Same relative layout
+         as the repository: src/bepinex_plugin/abstractions/. -->
+    <ProjectReference Include="..\bepinex_plugin\abstractions\LocalModManager.Abstractions.csproj">
       <Private>true</Private>
     </ProjectReference>
   </ItemGroup>
