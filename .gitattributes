@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 行尾治理（v14 P3，审计报告 §6.0 处置方案 A+D）
+#
+# 本仓字节约定：**文本文件一律 CRLF**（v14 仓库红线；v13 之前出过两次行尾事故——
+# 批次 25 有 9 个文件被静默规范成 LF；PR#1 的 Plugin.cs 是混合行尾、另有 4 个新文件
+# 是纯 LF）。下面这组规则的目的就是让**任何机器**（不论 core.autocrlf 取值）
+# 检出与提交的行尾都确定，不再被静默改写。git 只动行尾，不动编码：
+# .bat 是 GBK 编码，这里只固定行尾，绝不参与编码转换。
+#
+# ⚠️ 已知权衡（待委托方裁定，见工程实施报告 v14 §P3）：
+#   `text` 属性会让 git 在 **add 时把 CRLF 规范成 LF 存进对象库**（检出时再还原 CRLF）。
+#   本仓当前对象库里是**CRLF 字节**（由 GitHub API 逐字节推送保证）。因此若将来改用
+#   git 命令行提交，对象库字节会从 CRLF 变成 LF（工作区仍是 CRLF）。
+#   若"对象库字节必须保持 CRLF"优先，请把下面文本类的 `text` 换成 `-text`——
+#   代价是 git 会把它们当二进制，diff 不再逐行显示。
+# ─────────────────────────────────────────────────────────────────────────────
+
+* text=auto eol=crlf
+
+# 显式点名：可读性 + 防止将来 `*` 规则变化时失去约束
+*.cs      text eol=crlf
+*.csproj  text eol=crlf
+*.sln     text eol=crlf
+*.md      text eol=crlf
+*.json    text eol=crlf
+*.ini     text eol=crlf
+*.txt     text eol=crlf
+*.ps1     text eol=crlf
+*.py      text eol=crlf
+*.c       text eol=crlf
+*.h       text eol=crlf
+
+# .bat：GBK 编码，只固定行尾、不做任何编码转换
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# 二进制：禁止任何行尾/内容转换
+*.dll     -text
+*.exe     -text
+*.pdb     -text
+*.lib     -text
+*.zip     -text
+*.7z      -text
+*.png     -text
+*.jpg     -text
+*.jpeg    -text
+*.gif     -text
+*.ttf     -text
+*.otf     -text
+*.bundle  -text
+*.msgpack -text
